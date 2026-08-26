@@ -36,6 +36,7 @@
 #define H1008C_A2_RANGE_MVP     0x03
 
 struct dev_context {
+	struct sr_sw_limits limits;
 	uint64_t samplerate;
 	gboolean running;
 	uint64_t frame_count;

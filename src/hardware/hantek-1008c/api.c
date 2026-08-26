@@ -25,6 +25,7 @@ static const uint32_t drvopts[] = {
 static const uint32_t devopts[] = {
 	SR_CONF_CONN | SR_CONF_GET,
 	SR_CONF_CONTINUOUS,
+	SR_CONF_LIMIT_SAMPLES | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_SAMPLERATE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 };
 
@@ -91,6 +92,7 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 		/* MVP intentionally exposes CH1 only. */
 		sr_channel_new(sdi, 0, SR_CHANNEL_ANALOG, TRUE, "CH1");
 		devc = g_malloc0(sizeof(*devc));
+		sr_sw_limits_init(&devc->limits);
 		devc->samplerate = H1008C_SAMPLERATE;
 		sdi->priv = devc;
 		devices = g_slist_append(devices, sdi);
@@ -115,6 +117,8 @@ static int config_get(uint32_t key, GVariant **data,
 		*data = g_variant_new_printf("%d.%d", usb->bus, usb->address);
 		return SR_OK;
 	}
+	case SR_CONF_LIMIT_SAMPLES:
+		return sr_sw_limits_config_get(&devc->limits, key, data);
 	case SR_CONF_SAMPLERATE:
 		*data = g_variant_new_uint64(devc->samplerate);
 		return SR_OK;
@@ -130,6 +134,8 @@ static int config_set(uint32_t key, GVariant *data,
 	uint64_t rate;
 	(void)cg;
 
+	if (key == SR_CONF_LIMIT_SAMPLES)
+		return sr_sw_limits_config_set(&devc->limits, key, data);
 	if (key != SR_CONF_SAMPLERATE)
 		return SR_ERR_NA;
 	rate = g_variant_get_uint64(data);
@@ -171,6 +177,7 @@ static int receive_frame(int fd, int revents, void *cb_data)
 	float *samples;
 	size_t count;
 	uint16_t zero;
+	uint64_t remain;
 	int ret;
 
 	(void)fd;
@@ -185,10 +192,22 @@ static int receive_frame(int fd, int revents, void *cb_data)
 		return TRUE;
 	}
 
+	remain = count;
+	if (devc->limits.limit_samples) {
+		uint64_t left = devc->limits.limit_samples > devc->limits.samples_read ?
+			devc->limits.limit_samples - devc->limits.samples_read : 0;
+		remain = MIN((uint64_t)count, left);
+	}
+	if (!remain) {
+		g_free(samples);
+		sr_dev_acquisition_stop(sdi);
+		return TRUE;
+	}
+
 	sr_analog_init(&analog, &encoding, &meaning, &spec, 0);
 	packet.type = SR_DF_ANALOG;
 	packet.payload = &analog;
-	analog.num_samples = count;
+	analog.num_samples = remain;
 	analog.data = samples;
 	analog.meaning->mq = SR_MQ_COUNT;
 	analog.meaning->unit = SR_UNIT_UNITLESS;
@@ -204,8 +223,12 @@ static int receive_frame(int fd, int revents, void *cb_data)
 	g_free(samples);
 
 	devc->frame_count++;
-	sr_dbg("frame=%" PRIu64 " samples=%zu delta-zero=%u",
-		devc->frame_count, count, zero);
+	sr_sw_limits_update_samples_read(&devc->limits, remain);
+	sr_sw_limits_update_frames_read(&devc->limits, 1);
+	sr_dbg("frame=%" PRIu64 " samples=%" PRIu64 " delta-zero=%u",
+		devc->frame_count, remain, zero);
+	if (sr_sw_limits_check(&devc->limits))
+		sr_dev_acquisition_stop(sdi);
 	return TRUE;
 }
 
@@ -217,6 +240,7 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 		return SR_ERR;
 	devc->running = TRUE;
 	devc->frame_count = 0;
+	sr_sw_limits_acquisition_start(&devc->limits);
 	std_session_send_df_header(sdi);
 	/* Synchronous MVP: each callback acquires one complete two-buffer burst. */
 	return sr_session_source_add(sdi->session, -1, 0, 1,
