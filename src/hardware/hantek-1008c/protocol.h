@@ -46,6 +46,6 @@ SR_PRIV int h1008c_open(struct sr_dev_inst *sdi);
 SR_PRIV int h1008c_close(struct sr_dev_inst *sdi);
 SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi);
 SR_PRIV int h1008c_acquire_frame(const struct sr_dev_inst *sdi,
-		float **samples, size_t *sample_count, uint16_t *delta_zero);
+		float **samples, size_t *sample_count, float *delta_zero);
 
 #endif

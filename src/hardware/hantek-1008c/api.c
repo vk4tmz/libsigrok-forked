@@ -176,7 +176,7 @@ static int receive_frame(int fd, int revents, void *cb_data)
 	struct sr_analog_spec spec;
 	float *samples;
 	size_t count;
-	uint16_t zero;
+	float zero;
 	uint64_t remain;
 	int ret;
 
@@ -225,7 +225,7 @@ static int receive_frame(int fd, int revents, void *cb_data)
 	devc->frame_count++;
 	sr_sw_limits_update_samples_read(&devc->limits, remain);
 	sr_sw_limits_update_frames_read(&devc->limits, 1);
-	sr_dbg("frame=%" PRIu64 " samples=%" PRIu64 " delta-zero=%u",
+	sr_dbg("frame=%" PRIu64 " samples=%" PRIu64 " delta-zero=%.3f",
 		devc->frame_count, remain, zero);
 	if (sr_sw_limits_check(&devc->limits))
 		sr_dev_acquisition_stop(sdi);

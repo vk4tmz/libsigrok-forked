@@ -11,6 +11,7 @@
 
 #include <config.h>
 #include <string.h>
+#include <math.h>
 #include "protocol.h"
 
 static int usb_write(const struct sr_dev_inst *sdi, const uint8_t *buf, int len)
@@ -230,54 +231,143 @@ static int read_buffer(const struct sr_dev_inst *sdi, uint8_t selector,
 	return SR_OK;
 }
 
-static uint16_t estimate_delta_zero(const uint8_t *buf, size_t len)
+static float estimate_delta_zero(const uint8_t *buf, size_t len)
 {
+	/* Match the proven Python continuous reconstructor: acquisition median. */
 	uint32_t hist[4096] = { 0 };
-	uint16_t best;
-	uint32_t best_count;
-	size_t i;
+	size_t i, count, mid1, mid2, seen;
+	uint16_t lo, hi;
 
+	count = len / 2;
 	for (i = 0; i + 1 < len; i += 2) {
 		uint16_t v = ((uint16_t)buf[i] | ((uint16_t)buf[i + 1] << 8)) & 0x0fff;
 		hist[v]++;
 	}
-	best = 0;
-	best_count = hist[0];
-	for (i = 1; i < ARRAY_SIZE(hist); i++) {
-		if (hist[i] > best_count) {
-			best = i;
-			best_count = hist[i];
+	if (!count)
+		return 0.0f;
+
+	mid1 = (count - 1) / 2;
+	mid2 = count / 2;
+	seen = 0;
+	lo = hi = 0;
+	for (i = 0; i < ARRAY_SIZE(hist); i++) {
+		if (!hist[i])
+			continue;
+		if (seen <= mid1 && mid1 < seen + hist[i])
+			lo = (uint16_t)i;
+		if (seen <= mid2 && mid2 < seen + hist[i]) {
+			hi = (uint16_t)i;
+			break;
 		}
+		seen += hist[i];
 	}
-	return best;
+	return ((float)lo + (float)hi) / 2.0f;
+}
+
+static float median_small(float *vals, size_t n)
+{
+	size_t i, j;
+	float tmp;
+
+	for (i = 1; i < n; i++) {
+		tmp = vals[i];
+		j = i;
+		while (j > 0 && vals[j - 1] > tmp) {
+			vals[j] = vals[j - 1];
+			j--;
+		}
+		vals[j] = tmp;
+	}
+	if (n & 1)
+		return vals[n / 2];
+	return (vals[n / 2 - 1] + vals[n / 2]) / 2.0f;
 }
 
 static void reconstruct_relative_counts(const uint8_t *buf, size_t len,
-		uint16_t zero, float *out)
+		float zero, float *out)
 {
 	/*
-	 * Experimental reconstruction: the observed 12-bit words are strongly
-	 * delta-like. Integrate (word - acquisition mode) without thresholding,
-	 * filtering or smoothing. The accumulator intentionally starts at zero
-	 * for each burst because an absolute frame-to-frame level is not yet
-	 * encoded by any protocol field we have proven.
+	 * Port of hantek1008c.analysis.reconstruct_continuous_delta().
+	 *
+	 * 1. Subtract the acquisition-local median raw word.
+	 * 2. Replace only implausibly large (>64 count) isolated deltas with the
+	 *    local median of neighbouring non-discontinuous deltas.
+	 * 3. Integrate the cleaned deltas.
+	 * 4. Remove the best-fit linear drift caused by sub-count zero error.
+	 *
+	 * No voltage calibration, display centring, smoothing, or sample-rate
+	 * normalisation is done here. Output remains experimental relative counts.
 	 */
-	float acc;
-	size_t i, n;
+	const float discontinuity_limit = 64.0f;
+	float *deltas, *cleaned;
+	float acc, mx, my, num, den, slope, intercept;
+	size_t i, j, n, lo, hi, good_n;
+
+	n = len / 2;
+	deltas = g_try_new(float, n);
+	cleaned = g_try_new(float, n);
+	if (!deltas || !cleaned) {
+		g_free(deltas);
+		g_free(cleaned);
+		for (i = 0; i < n; i++)
+			out[i] = 0.0f;
+		return;
+	}
+
+	for (i = 0; i < n; i++) {
+		uint16_t v = ((uint16_t)buf[i * 2] | ((uint16_t)buf[i * 2 + 1] << 8)) & 0x0fff;
+		deltas[i] = (float)v - zero;
+		cleaned[i] = deltas[i];
+	}
+
+	for (i = 0; i < n; i++) {
+		float local[9];
+		if (fabsf(deltas[i]) <= discontinuity_limit)
+			continue;
+		lo = i > 4 ? i - 4 : 0;
+		hi = MIN(n, i + 5);
+		good_n = 0;
+		for (j = lo; j < hi; j++) {
+			if (fabsf(deltas[j]) <= discontinuity_limit)
+				local[good_n++] = deltas[j];
+		}
+		cleaned[i] = good_n ? median_small(local, good_n) : 0.0f;
+	}
 
 	acc = 0.0f;
-	n = 0;
-	for (i = 0; i + 1 < len; i += 2) {
-		uint16_t v = ((uint16_t)buf[i] | ((uint16_t)buf[i + 1] << 8)) & 0x0fff;
-		acc += (float)((int)v - (int)zero);
-		out[n++] = acc;
+	for (i = 0; i < n; i++) {
+		acc += cleaned[i];
+		out[i] = acc;
 	}
+
+	if (n >= 2) {
+		mx = ((float)n - 1.0f) / 2.0f;
+		my = 0.0f;
+		for (i = 0; i < n; i++)
+			my += out[i];
+		my /= (float)n;
+		num = 0.0f;
+		den = 0.0f;
+		for (i = 0; i < n; i++) {
+			float dx = (float)i - mx;
+			num += dx * (out[i] - my);
+			den += dx * dx;
+		}
+		slope = den ? num / den : 0.0f;
+		intercept = my - slope * mx;
+		for (i = 0; i < n; i++)
+			out[i] -= intercept + slope * (float)i;
+	}
+
+	g_free(cleaned);
+	g_free(deltas);
 }
 
 SR_PRIV int h1008c_acquire_frame(const struct sr_dev_inst *sdi,
-		float **samples, size_t *sample_count, uint16_t *delta_zero)
+		float **samples, size_t *sample_count, float *delta_zero)
 {
-	uint16_t size2, size3, zero;
+	uint16_t size2, size3;
+	float zero;
 	uint8_t *raw;
 	float *out;
 	size_t total;
