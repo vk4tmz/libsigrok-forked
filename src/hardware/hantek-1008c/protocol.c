@@ -96,6 +96,8 @@ SR_PRIV int h1008c_open(struct sr_dev_inst *sdi)
 			continue;
 		if (libusb_open(devlist[i], &usb->devhdl) != LIBUSB_SUCCESS)
 			continue;
+		usb->bus = libusb_get_bus_number(devlist[i]);
+		usb->address = libusb_get_device_address(devlist[i]);
 		ret = SR_OK;
 		break;
 	}
@@ -110,6 +112,8 @@ SR_PRIV int h1008c_open(struct sr_dev_inst *sdi)
 		usb->devhdl = NULL;
 		return SR_ERR;
 	}
+	sr_dbg("USB connection active at %u.%u (%s).", usb->bus, usb->address,
+		sdi->connection_id ? sdi->connection_id : "unknown-port");
 	return SR_OK;
 }
 
@@ -122,6 +126,20 @@ SR_PRIV int h1008c_close(struct sr_dev_inst *sdi)
 	libusb_release_interface(usb->devhdl, H1008C_USB_INTERFACE);
 	libusb_close(usb->devhdl);
 	usb->devhdl = NULL;
+	return SR_OK;
+}
+
+SR_PRIV int h1008c_reopen(struct sr_dev_inst *sdi)
+{
+	/*
+	 * Closing a stale libusb handle is harmless, and h1008c_open() locates
+	 * the current device by sdi->connection_id (physical USB port path), not
+	 * by the potentially changed USB address recorded during the first scan.
+	 */
+	h1008c_close(sdi);
+	if (h1008c_open(sdi) != SR_OK)
+		return SR_ERR;
+	sr_dbg("Reacquired Hantek 1008C for new acquisition.");
 	return SR_OK;
 }
 

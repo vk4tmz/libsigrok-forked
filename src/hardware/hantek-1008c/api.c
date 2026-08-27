@@ -216,17 +216,24 @@ static int receive_frame(int fd, int revents, void *cb_data)
 	analog.encoding->digits = 0;
 	analog.spec->spec_digits = 0;
 
+	/*
+	 * One physical 4000-sample acquisition burst is one truthful Sigrok
+	 * frame. Do not concatenate bursts: the device has a substantial re-arm
+	 * gap and each burst starts at an unrelated signal phase.
+	 */
 	std_session_send_df_frame_begin(sdi);
 	sr_session_send(sdi, &packet);
 	std_session_send_df_frame_end(sdi);
 	g_slist_free(analog.meaning->channels);
 	g_free(samples);
 
-	devc->frame_count++;
+	devc->burst_count++;
 	sr_sw_limits_update_samples_read(&devc->limits, remain);
 	sr_sw_limits_update_frames_read(&devc->limits, 1);
-	sr_dbg("frame=%" PRIu64 " samples=%" PRIu64 " delta-zero=%.3f",
-		devc->frame_count, remain, zero);
+	sr_dbg("burst=%" PRIu64 " frame=%" PRIu64 " samples=%" PRIu64
+		" total=%" PRIu64 " delta-zero=%.3f",
+		devc->burst_count, devc->limits.frames_read, remain,
+		devc->limits.samples_read, zero);
 	if (sr_sw_limits_check(&devc->limits))
 		sr_dev_acquisition_stop(sdi);
 	return TRUE;
@@ -235,14 +242,26 @@ static int receive_frame(int fd, int revents, void *cb_data)
 static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 {
 	struct dev_context *devc = sdi->priv;
+	struct sr_dev_inst *mutable_sdi = (struct sr_dev_inst *)sdi;
+
+	/*
+	 * The 1008C can logically disappear/re-enumerate after several seconds
+	 * without protocol traffic. PulseView commonly keeps the device instance
+	 * open between Run presses, leaving us with a stale libusb handle. Refresh
+	 * the handle by physical USB port path at the start of every acquisition.
+	 */
+	if (h1008c_reopen(mutable_sdi) != SR_OK) {
+		sr_err("Unable to reacquire Hantek 1008C USB connection.");
+		return SR_ERR;
+	}
 
 	if (h1008c_startup(sdi) != SR_OK)
 		return SR_ERR;
 	devc->running = TRUE;
-	devc->frame_count = 0;
+	devc->burst_count = 0;
 	sr_sw_limits_acquisition_start(&devc->limits);
 	std_session_send_df_header(sdi);
-	/* Synchronous MVP: each callback acquires one complete two-buffer burst. */
+	/* Synchronous MVP: each callback acquires one complete hardware burst. */
 	return sr_session_source_add(sdi->session, -1, 0, 1,
 		receive_frame, (struct sr_dev_inst *)sdi);
 }

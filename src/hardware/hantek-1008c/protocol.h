@@ -39,11 +39,12 @@ struct dev_context {
 	struct sr_sw_limits limits;
 	uint64_t samplerate;
 	gboolean running;
-	uint64_t frame_count;
+	uint64_t burst_count;
 };
 
 SR_PRIV int h1008c_open(struct sr_dev_inst *sdi);
 SR_PRIV int h1008c_close(struct sr_dev_inst *sdi);
+SR_PRIV int h1008c_reopen(struct sr_dev_inst *sdi);
 SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi);
 SR_PRIV int h1008c_acquire_frame(const struct sr_dev_inst *sdi,
 		float **samples, size_t *sample_count, float *delta_zero);
