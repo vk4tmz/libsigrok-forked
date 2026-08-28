@@ -10,6 +10,7 @@
  */
 
 #include <config.h>
+#include <math.h>
 #include "protocol.h"
 
 static struct sr_dev_driver hantek_1008c_driver_info;
@@ -165,6 +166,82 @@ static int dev_close(struct sr_dev_inst *sdi)
 	return h1008c_close(sdi);
 }
 
+static void load_persistent_calibration(const struct sr_dev_inst *sdi)
+{
+	struct dev_context *devc = sdi->priv;
+	GKeyFile *keyfile;
+	GError *error;
+	gchar *path, *section;
+	gint version;
+	double zero_adc, volts_per_count;
+
+	devc->calibration_valid = FALSE;
+	devc->calibration_zero_adc = 0.0;
+	devc->calibration_volts_per_count = 0.0;
+
+	path = g_build_filename(g_get_user_data_dir(), "hantek-1008c",
+		"calibration.ini", NULL);
+	keyfile = g_key_file_new();
+	error = NULL;
+	if (!g_key_file_load_from_file(keyfile, path, G_KEY_FILE_NONE, &error)) {
+		if (error && !g_error_matches(error, G_FILE_ERROR, G_FILE_ERROR_NOENT))
+			sr_warn("Unable to read calibration file %s: %s.", path, error->message);
+		g_clear_error(&error);
+		g_key_file_free(keyfile);
+		g_free(path);
+		return;
+	}
+
+	error = NULL;
+	version = g_key_file_get_integer(keyfile, "format", "version", &error);
+	if (error || version != 1) {
+		sr_warn("Ignoring unsupported Hantek calibration format in %s.", path);
+		g_clear_error(&error);
+		g_key_file_free(keyfile);
+		g_free(path);
+		return;
+	}
+
+	section = g_strdup_printf("device %s channel CH1 range %02X",
+		sdi->connection_id ? sdi->connection_id : "", H1008C_A2_RANGE_MVP);
+	if (!g_key_file_has_group(keyfile, section)) {
+		sr_warn("No persisted calibration for %s CH1 A2=%02X; using raw ADC counts.",
+			sdi->connection_id ? sdi->connection_id : "unknown-port",
+			H1008C_A2_RANGE_MVP);
+		g_free(section);
+		g_key_file_free(keyfile);
+		g_free(path);
+		return;
+	}
+
+	error = NULL;
+	zero_adc = g_key_file_get_double(keyfile, section, "zero_adc", &error);
+	if (error) {
+		sr_warn("Invalid zero_adc in Hantek calibration section %s.", section);
+		g_clear_error(&error);
+		goto out;
+	}
+	volts_per_count = g_key_file_get_double(keyfile, section,
+		"volts_per_count", &error);
+	if (error || !isfinite(zero_adc) || !isfinite(volts_per_count) ||
+		volts_per_count <= 0.0) {
+		sr_warn("Invalid Hantek calibration values in section %s.", section);
+		g_clear_error(&error);
+		goto out;
+	}
+
+	devc->calibration_zero_adc = zero_adc;
+	devc->calibration_volts_per_count = volts_per_count;
+	devc->calibration_valid = TRUE;
+	sr_info("Loaded calibration for CH1 A2=%02X: zero=%.3f, scale=%.9g V/count.",
+		H1008C_A2_RANGE_MVP, zero_adc, volts_per_count);
+
+out:
+	g_free(section);
+	g_key_file_free(keyfile);
+	g_free(path);
+}
+
 static int receive_frame(int fd, int revents, void *cb_data)
 {
 	struct sr_dev_inst *sdi = cb_data;
@@ -203,17 +280,32 @@ static int receive_frame(int fd, int revents, void *cb_data)
 		return TRUE;
 	}
 
+	if (devc->calibration_valid) {
+		size_t i;
+
+		for (i = 0; i < remain; i++)
+			samples[i] = (float)((samples[i] - devc->calibration_zero_adc) *
+				devc->calibration_volts_per_count);
+	}
+
 	sr_analog_init(&analog, &encoding, &meaning, &spec, 0);
 	packet.type = SR_DF_ANALOG;
 	packet.payload = &analog;
 	analog.num_samples = remain;
 	analog.data = samples;
-	analog.meaning->mq = SR_MQ_COUNT;
-	analog.meaning->unit = SR_UNIT_UNITLESS;
+	if (devc->calibration_valid) {
+		analog.meaning->mq = SR_MQ_VOLTAGE;
+		analog.meaning->unit = SR_UNIT_VOLT;
+		analog.encoding->digits = 3;
+		analog.spec->spec_digits = 3;
+	} else {
+		analog.meaning->mq = SR_MQ_COUNT;
+		analog.meaning->unit = SR_UNIT_PIECE;
+		analog.encoding->digits = 0;
+		analog.spec->spec_digits = 0;
+	}
 	analog.meaning->mqflags = 0;
 	analog.meaning->channels = g_slist_append(NULL, sdi->channels->data);
-	analog.encoding->digits = 0;
-	analog.spec->spec_digits = 0;
 
 	/*
 	 * One physical 4000-sample acquisition burst is one truthful Sigrok
@@ -254,6 +346,7 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 		return SR_ERR;
 	}
 
+	load_persistent_calibration(sdi);
 	if (h1008c_startup(sdi) != SR_OK)
 		return SR_ERR;
 	devc->running = TRUE;

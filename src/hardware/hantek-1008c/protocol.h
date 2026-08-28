@@ -33,7 +33,7 @@
 #define H1008C_F6_DELAY_US            213200
 #define H1008C_BURST_ARM_DELAY_US     15000
 #define H1008C_A5_POLL_DELAY_US       2000
-#define H1008C_A5_READY_POLLS         20
+#define H1008C_A5_READY_POLLS         100
 
 #define H1008C_NUM_HW_CHANNELS  8
 #define H1008C_MVP_CHANNELS     1
@@ -46,6 +46,9 @@ struct dev_context {
 	uint64_t samplerate;
 	gboolean running;
 	uint64_t burst_count;
+	gboolean calibration_valid;
+	double calibration_zero_adc;
+	double calibration_volts_per_count;
 };
 
 SR_PRIV int h1008c_open(struct sr_dev_inst *sdi);

@@ -199,7 +199,7 @@ static int wait_ready(const struct sr_dev_inst *sdi)
 		g_usleep(H1008C_A5_POLL_DELAY_US);
 	}
 
-	sr_err("A5 never reached ready state 2/3; device may need USB replug.");
+	sr_err("A5 never reached ready state 2/3 within readiness window.");
 	return SR_ERR;
 }
 
@@ -233,7 +233,7 @@ static int read_current_buffers(const struct sr_dev_inst *sdi,
 	return SR_OK;
 }
 
-static int calibration_pass(const struct sr_dev_inst *sdi, uint8_t range)
+static int startup_range_pass(const struct sr_dev_inst *sdi, uint8_t range)
 {
 	uint8_t a2[] = { 0xa2, range, range, range, range, range, range, range, range };
 	static const uint8_t f3[] = { 0xf3 };
@@ -253,7 +253,7 @@ static int calibration_pass(const struct sr_dev_inst *sdi, uint8_t range)
 		return SR_ERR;
 	if (read_current_buffers(sdi, &raw, &total) != SR_OK)
 		return SR_ERR;
-	sr_dbg("Calibration range %u consumed %zu bytes (%zu words).",
+	sr_dbg("Startup range pass %u consumed %zu bytes (%zu words).",
 		range, total, total / 2);
 	g_free(raw);
 	return SR_OK;
@@ -322,7 +322,7 @@ SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi)
 	}
 
 	for (i = 1; i <= 3; i++) {
-		if (calibration_pass(sdi, (uint8_t)i) != SR_OK)
+		if (startup_range_pass(sdi, (uint8_t)i) != SR_OK)
 			return SR_ERR;
 	}
 
