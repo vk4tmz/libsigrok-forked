@@ -251,9 +251,10 @@ static int receive_frame(int fd, int revents, void *cb_data)
 	struct sr_analog_encoding encoding;
 	struct sr_analog_meaning meaning;
 	struct sr_analog_spec spec;
-	float *samples;
-	size_t count;
-		uint64_t remain;
+	float *samples, *gap_samples;
+	size_t count, gap_count, i;
+	uint64_t remain;
+	gint64 a4_start_us, delta_us, burst_us, gap_us;
 	int ret;
 
 	(void)fd;
@@ -261,7 +262,7 @@ static int receive_frame(int fd, int revents, void *cb_data)
 	if (!devc->running)
 		return TRUE;
 
-	ret = h1008c_acquire_frame(sdi, &samples, &count);
+	ret = h1008c_acquire_frame(sdi, &samples, &count, &a4_start_us);
 	if (ret != SR_OK) {
 		sr_err("Acquisition failed; stopping experimental Hantek 1008C stream.");
 		sr_dev_acquisition_stop(sdi);
@@ -308,23 +309,51 @@ static int receive_frame(int fd, int revents, void *cb_data)
 	analog.meaning->channels = g_slist_append(NULL, sdi->channels->data);
 
 	/*
-	 * One physical 4000-sample acquisition burst is one truthful Sigrok
-	 * frame. Do not concatenate bursts: the device has a substantial re-arm
-	 * gap and each burst starts at an unrelated signal phase.
+	 * Experimental gap representation: preserve the 2.4 MS/s sample clock
+	 * while marking host/device dead time as NaN (missing, not measured).
+	 * Derive the gap from successive A4 acquisition-start timestamps.
 	 */
-	std_session_send_df_frame_begin(sdi);
+	if (devc->previous_a4_start_valid && a4_start_us > devc->previous_a4_start_us) {
+		delta_us = a4_start_us - devc->previous_a4_start_us;
+		burst_us = (gint64)((devc->previous_burst_samples *
+			G_GINT64_CONSTANT(1000000) + H1008C_SAMPLERATE / 2) /
+			H1008C_SAMPLERATE);
+		gap_us = MAX(G_GINT64_CONSTANT(0), delta_us - burst_us);
+		gap_count = (size_t)((gap_us * (gint64)H1008C_SAMPLERATE +
+			G_GINT64_CONSTANT(500000)) / G_GINT64_CONSTANT(1000000));
+		if (gap_count) {
+			gap_samples = g_try_new(float, gap_count);
+			if (!gap_samples) {
+				g_slist_free(analog.meaning->channels);
+				g_free(samples);
+				return TRUE;
+			}
+			for (i = 0; i < gap_count; i++)
+				gap_samples[i] = NAN;
+			analog.num_samples = gap_count;
+			analog.data = gap_samples;
+			sr_session_send(sdi, &packet);
+			g_free(gap_samples);
+			sr_dbg("burst=%" PRIu64 " gap=%" G_GINT64_FORMAT
+				" us gap_samples=%zu start_delta=%" G_GINT64_FORMAT " us",
+				devc->burst_count + 1, gap_us, gap_count, delta_us);
+		}
+	}
+	devc->previous_a4_start_us = a4_start_us;
+	devc->previous_a4_start_valid = TRUE;
+	devc->previous_burst_samples = remain;
+
+	analog.num_samples = remain;
+	analog.data = samples;
 	sr_session_send(sdi, &packet);
-	std_session_send_df_frame_end(sdi);
 	g_slist_free(analog.meaning->channels);
 	g_free(samples);
 
 	devc->burst_count++;
 	sr_sw_limits_update_samples_read(&devc->limits, remain);
-	sr_sw_limits_update_frames_read(&devc->limits, 1);
-	sr_dbg("burst=%" PRIu64 " frame=%" PRIu64 " samples=%" PRIu64
-		" total=%" PRIu64 " direct-adc",
-		devc->burst_count, devc->limits.frames_read, remain,
-		devc->limits.samples_read);
+	sr_dbg("burst=%" PRIu64 " samples=%" PRIu64 " total=%" PRIu64
+		" direct-adc",
+		devc->burst_count, remain, devc->limits.samples_read);
 	if (sr_sw_limits_check(&devc->limits))
 		sr_dev_acquisition_stop(sdi);
 	return TRUE;
@@ -351,6 +380,9 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 		return SR_ERR;
 	devc->running = TRUE;
 	devc->burst_count = 0;
+	devc->previous_a4_start_us = 0;
+	devc->previous_a4_start_valid = FALSE;
+	devc->previous_burst_samples = 0;
 	sr_sw_limits_acquisition_start(&devc->limits);
 	std_session_send_df_header(sdi);
 	/* Synchronous MVP: each callback acquires one complete hardware burst. */

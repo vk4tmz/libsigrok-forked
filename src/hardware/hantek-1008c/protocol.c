@@ -337,7 +337,7 @@ SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi)
 	return SR_OK;
 }
 
-static int prepare_direct_capture(const struct sr_dev_inst *sdi)
+static int prepare_direct_capture(const struct sr_dev_inst *sdi, gint64 *a4_start_us)
 {
 	static const uint8_t f3[] = { 0xf3 };
 	static const uint8_t e4[] = { 0xe4, 0x01 };
@@ -348,10 +348,14 @@ static int prepare_direct_capture(const struct sr_dev_inst *sdi)
 
 	if (command(sdi, f3, sizeof(f3)) != SR_OK ||
 	    command(sdi, e4, sizeof(e4)) != SR_OK ||
-	    command(sdi, e6, sizeof(e6)) != SR_OK ||
-	    command(sdi, a4, sizeof(a4)) != SR_OK)
+	    command(sdi, e6, sizeof(e6)) != SR_OK)
 		return SR_ERR;
-	g_usleep(H1008C_BURST_ARM_DELAY_US);
+	if (a4_start_us)
+		*a4_start_us = g_get_monotonic_time();
+	if (command(sdi, a4, sizeof(a4)) != SR_OK)
+		return SR_ERR;
+	if (H1008C_BURST_ARM_DELAY_US)
+		g_usleep(H1008C_BURST_ARM_DELAY_US);
 	if (command(sdi, c0, sizeof(c0)) != SR_OK ||
 	    command(sdi, c2, sizeof(c2)) != SR_OK || wait_ready(sdi) != SR_OK)
 		return SR_ERR;
@@ -370,7 +374,7 @@ static int finish_direct_capture(const struct sr_dev_inst *sdi)
 }
 
 SR_PRIV int h1008c_acquire_frame(const struct sr_dev_inst *sdi,
-		float **samples, size_t *sample_count)
+		float **samples, size_t *sample_count, gint64 *a4_start_us)
 {
 	uint8_t *raw;
 	float *out;
@@ -379,7 +383,9 @@ SR_PRIV int h1008c_acquire_frame(const struct sr_dev_inst *sdi,
 
 	*samples = NULL;
 	*sample_count = 0;
-	if (prepare_direct_capture(sdi) != SR_OK)
+	if (a4_start_us)
+		*a4_start_us = 0;
+	if (prepare_direct_capture(sdi, a4_start_us) != SR_OK)
 		return SR_ERR;
 	ret = read_current_buffers(sdi, &raw, &total);
 	if (finish_direct_capture(sdi) != SR_OK) {

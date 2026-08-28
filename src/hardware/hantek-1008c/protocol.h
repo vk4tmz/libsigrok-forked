@@ -31,7 +31,7 @@
 #define H1008C_INIT_B0_DELAY_US       (700 * 1000)
 #define H1008C_CAL_CAPTURE_DELAY_US   12400
 #define H1008C_F6_DELAY_US            213200
-#define H1008C_BURST_ARM_DELAY_US     15000
+#define H1008C_BURST_ARM_DELAY_US     0
 #define H1008C_A5_POLL_DELAY_US       2000
 #define H1008C_A5_READY_POLLS         100
 
@@ -49,6 +49,9 @@ struct dev_context {
 	gboolean calibration_valid;
 	double calibration_zero_adc;
 	double calibration_volts_per_count;
+	gint64 previous_a4_start_us;
+	gboolean previous_a4_start_valid;
+	uint64_t previous_burst_samples;
 };
 
 SR_PRIV int h1008c_open(struct sr_dev_inst *sdi);
@@ -56,6 +59,6 @@ SR_PRIV int h1008c_close(struct sr_dev_inst *sdi);
 SR_PRIV int h1008c_reopen(struct sr_dev_inst *sdi);
 SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi);
 SR_PRIV int h1008c_acquire_frame(const struct sr_dev_inst *sdi,
-		float **samples, size_t *sample_count);
+		float **samples, size_t *sample_count, gint64 *a4_start_us);
 
 #endif
