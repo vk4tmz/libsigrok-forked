@@ -259,7 +259,7 @@ static int startup_range_pass(const struct sr_dev_inst *sdi, uint8_t range)
 	return SR_OK;
 }
 
-SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi)
+SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi, uint8_t burst_a3)
 {
 	/* Full direct-ADC initialization validated against mfg92/hantek1008py. */
 	static const uint8_t b0[] = { 0xb0 };
@@ -281,7 +281,7 @@ SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi)
 	static const uint8_t a7[] = { 0xa7, 0x00, 0x00 };
 	static const uint8_t ac_init[] = { 0xac, 0x01, 0xf4, 0x00, 0x09, 0xc5, 0x00, 0x09, 0xc5 };
 	static const uint8_t f6[] = { 0xf6 };
-	static const uint8_t a3_fast[] = { 0xa3, H1008C_A3_24MSPS };
+	uint8_t a3_selected[] = { 0xa3, burst_a3 };
 	static const uint8_t ac_pre[] = { 0xac, 0x00, 0xc8, 0x00, 0x02, 0xbd, 0x00, 0x02, 0xbd };
 	static const uint8_t e4[] = { 0xe4, 0x01 };
 	static const uint8_t e6[] = { 0xe6, 0x01 };
@@ -300,13 +300,13 @@ SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi)
 		{ aa_all, sizeof(aa_all) }, { a3_default, sizeof(a3_default) },
 		{ c1, sizeof(c1) }, { a7, sizeof(a7) }, { ac_init, sizeof(ac_init) },
 	};
-	static const struct cmd init3_tail[] = {
+	const struct cmd init3_tail[] = {
 		{ e5, sizeof(e5) }, { f7, sizeof(f7) }, { f8, sizeof(f8) },
-		{ fa, sizeof(fa) }, { a3_fast, sizeof(a3_fast) },
+		{ fa, sizeof(fa) }, { a3_selected, sizeof(a3_selected) },
 		{ ac_pre, sizeof(ac_pre) }, { e4, sizeof(e4) }, { e6, sizeof(e6) },
 		{ f3, sizeof(f3) }, { a0_ch1, sizeof(a0_ch1) },
 		{ aa_ch1, sizeof(aa_ch1) }, { a2_ch1, sizeof(a2_ch1) },
-		{ a3_fast, sizeof(a3_fast) }, { c1, sizeof(c1) }, { a7, sizeof(a7) },
+		{ a3_selected, sizeof(a3_selected) }, { c1, sizeof(c1) }, { a7, sizeof(a7) },
 		{ ac_final, sizeof(ac_final) }, { ab, sizeof(ab) }, { e9, sizeof(e9) },
 	};
 	size_t i;
@@ -333,11 +333,12 @@ SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi)
 		if (command(sdi, init3_tail[i].data, init3_tail[i].len) != SR_OK)
 			return SR_ERR;
 	}
-	sr_info("Hantek 1008C direct-ADC initialization complete (CH1, 2.4 MS/s).");
+	sr_info("Hantek 1008C direct-ADC initialization complete (CH1, A3=%02x).",
+		burst_a3);
 	return SR_OK;
 }
 
-static int prepare_direct_capture(const struct sr_dev_inst *sdi, uint8_t a3_id)
+static int prepare_direct_capture(const struct sr_dev_inst *sdi)
 {
 	static const uint8_t f3[] = { 0xf3 };
 	static const uint8_t e4[] = { 0xe4, 0x01 };
@@ -345,12 +346,9 @@ static int prepare_direct_capture(const struct sr_dev_inst *sdi, uint8_t a3_id)
 	static const uint8_t a4[] = { 0xa4, 0x01 };
 	static const uint8_t c0[] = { 0xc0 };
 	static const uint8_t c2[] = { 0xc2 };
-	uint8_t a3[] = { 0xa3, a3_id };
-
 	if (command(sdi, f3, sizeof(f3)) != SR_OK ||
 	    command(sdi, e4, sizeof(e4)) != SR_OK ||
 	    command(sdi, e6, sizeof(e6)) != SR_OK ||
-	    command(sdi, a3, sizeof(a3)) != SR_OK ||
 	    command(sdi, a4, sizeof(a4)) != SR_OK)
 		return SR_ERR;
 	if (H1008C_BURST_ARM_DELAY_US)
@@ -372,7 +370,7 @@ static int finish_direct_capture(const struct sr_dev_inst *sdi)
 	return SR_OK;
 }
 
-SR_PRIV int h1008c_acquire_frame(const struct sr_dev_inst *sdi, uint8_t a3_id,
+SR_PRIV int h1008c_acquire_frame(const struct sr_dev_inst *sdi,
 		float **samples, size_t *sample_count)
 {
 	uint8_t *raw;
@@ -382,7 +380,7 @@ SR_PRIV int h1008c_acquire_frame(const struct sr_dev_inst *sdi, uint8_t a3_id,
 
 	*samples = NULL;
 	*sample_count = 0;
-	if (prepare_direct_capture(sdi, a3_id) != SR_OK)
+	if (prepare_direct_capture(sdi) != SR_OK)
 		return SR_ERR;
 	ret = read_current_buffers(sdi, &raw, &total);
 	if (finish_direct_capture(sdi) != SR_OK) {

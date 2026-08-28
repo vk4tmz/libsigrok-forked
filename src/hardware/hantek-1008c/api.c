@@ -362,7 +362,7 @@ static int receive_samples(int fd, int revents, void *cb_data)
 
 	frame = devc->acquisition_mode == H1008C_MODE_BURST;
 	if (frame)
-		ret = h1008c_acquire_frame(sdi, devc->a3, &samples, &count);
+		ret = h1008c_acquire_frame(sdi, &samples, &count);
 	else
 		ret = h1008c_read_roll(sdi, &samples, &count);
 	if (ret != SR_OK) {
@@ -427,7 +427,9 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 	}
 
 	load_persistent_calibration(sdi);
-	if (h1008c_startup(sdi) != SR_OK)
+	if (h1008c_startup(sdi,
+		devc->acquisition_mode == H1008C_MODE_BURST ?
+		devc->a3 : H1008C_A3_24MSPS) != SR_OK)
 		return SR_ERR;
 	devc->running = TRUE;
 	devc->burst_count = 0;
