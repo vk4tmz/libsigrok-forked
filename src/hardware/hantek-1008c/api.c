@@ -77,6 +77,44 @@ static const struct h1008c_rate *find_rate(uint64_t samplerate)
 	return NULL;
 }
 
+
+#define H1008C_BURST_FRAME_SAMPLES UINT64_C(4000)
+
+static uint64_t effective_sample_limit(const struct dev_context *devc,
+		uint64_t requested)
+{
+	uint64_t frames;
+
+	if (!requested || devc->acquisition_mode != H1008C_MODE_BURST)
+		return requested;
+
+	/*
+	 * BURST mode has an indivisible 4K hardware frame. Round the configured
+	 * limit up here, at the configuration boundary, so frontends such as
+	 * PulseView also learn the true capture size instead of allocating for
+	 * (for example) 5000 samples and clipping the second 4K frame.
+	 */
+	frames = (requested + H1008C_BURST_FRAME_SAMPLES - 1) /
+		H1008C_BURST_FRAME_SAMPLES;
+	return frames * H1008C_BURST_FRAME_SAMPLES;
+}
+
+static int apply_sample_limit(struct dev_context *devc)
+{
+	GVariant *value;
+	uint64_t effective;
+	int ret;
+
+	effective = effective_sample_limit(devc, devc->requested_limit_samples);
+	value = g_variant_new_uint64(effective);
+	ret = sr_sw_limits_config_set(&devc->limits, SR_CONF_LIMIT_SAMPLES, value);
+	if (ret == SR_OK && effective != devc->requested_limit_samples)
+		sr_info("Burst sample limit rounded from %" PRIu64
+			" to %" PRIu64 " to preserve complete 4K frames.",
+			devc->requested_limit_samples, effective);
+	return ret;
+}
+
 static GSList *scan(struct sr_dev_driver *di, GSList *options)
 {
 	struct drv_context *drvc = di->context;
@@ -182,7 +220,11 @@ static int config_set(uint32_t key, GVariant *data,
 	uint64_t samplerate;
 	(void)cg;
 
-	if (key == SR_CONF_LIMIT_SAMPLES || key == SR_CONF_LIMIT_FRAMES)
+	if (key == SR_CONF_LIMIT_SAMPLES) {
+		devc->requested_limit_samples = g_variant_get_uint64(data);
+		return apply_sample_limit(devc);
+	}
+	if (key == SR_CONF_LIMIT_FRAMES)
 		return sr_sw_limits_config_set(&devc->limits, key, data);
 	if (key != SR_CONF_SAMPLERATE)
 		return SR_ERR_NA;
@@ -193,6 +235,13 @@ static int config_set(uint32_t key, GVariant *data,
 	devc->samplerate = rate->samplerate;
 	devc->a3 = rate->a3;
 	devc->acquisition_mode = rate->mode;
+	/*
+	 * PulseView may set sample count and samplerate in either order. Re-apply
+	 * the user's requested sample limit after mode selection so BURST always
+	 * advertises an integral number of 4K frames while ROLL remains exact.
+	 */
+	if (apply_sample_limit(devc) != SR_OK)
+		return SR_ERR;
 	sr_info("Selected %" PRIu64 " samples/s: %s mode, A3=%02x.",
 		devc->samplerate,
 		devc->acquisition_mode == H1008C_MODE_ROLL ? "roll" : "burst",
@@ -377,7 +426,17 @@ static int receive_samples(int fd, int revents, void *cb_data)
 		return TRUE;
 
 	remain = count;
-	if (devc->limits.limit_samples) {
+	/*
+	 * A burst is one physical acquisition frame. Never truncate a completed
+	 * hardware frame merely to satisfy an aggregate sample limit: doing so
+	 * makes the final sweep appear shortened in frontends such as PulseView.
+	 * Let the software limit stop acquisition after the complete frame, even
+	 * when that means samples_read exceeds the requested limit by < 4K.
+	 *
+	 * Roll mode is a genuine continuous stream, so it may stop exactly at the
+	 * requested sample count.
+	 */
+	if (!frame && devc->limits.limit_samples) {
 		uint64_t left = devc->limits.limit_samples > devc->limits.samples_read ?
 			devc->limits.limit_samples - devc->limits.samples_read : 0;
 		remain = MIN((uint64_t)count, left);

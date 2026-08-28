@@ -160,3 +160,38 @@ continuous analog stream and are not wrapped in BURST frame markers.
 
 The 2.006 kSa/s, 1.003 kSa/s, 401 Sa/s and 201 Sa/s rates were validated using a 50 Hz
 sine signal and produced the expected samples-per-cycle progression.
+
+## Sample limits in BURST mode
+
+`SR_CONF_LIMIT_SAMPLES` is an aggregate session limit, but a Hantek BURST is a
+physical 4K acquisition frame. The driver therefore never truncates the final
+physical BURST frame to hit a non-multiple-of-4000 sample limit exactly.
+
+Examples:
+
+| Requested sample limit | BURST frames delivered | Samples delivered |
+|---:|---:|---:|
+| 1,000 | 1 | 4,000 |
+| 4,000 | 1 | 4,000 |
+| 5,000 | 2 | 8,000 |
+| 10,000 | 3 | 12,000 |
+| 20,000 | 5 | 20,000 |
+
+This preserves physical sweep integrity and prevents a frontend from displaying a
+shortened final sweep. ROLL mode is continuous and may stop exactly at the requested
+sample count. For BURST acquisition, `limit_frames` is the natural control when an
+exact number of sweeps is required.
+
+
+### PulseView sample-count normalization
+
+PulseView uses `SR_CONF_LIMIT_SAMPLES` not only as a stop condition but also as the
+capture size it expects to retain/display. In BURST mode the driver therefore rounds
+a non-zero requested sample limit **up to the next complete 4000-sample frame at
+configuration time**, and reports that effective value back through
+`SR_CONF_LIMIT_SAMPLES`.
+
+Examples: 5K -> 8K, 10K -> 12K, 20K -> 20K.
+
+This is in addition to never truncating packets at the session bus. ROLL mode keeps
+the exact requested sample limit because it is a true continuous stream.

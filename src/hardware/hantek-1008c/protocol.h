@@ -48,6 +48,7 @@ enum h1008c_acquisition_mode {
 
 struct dev_context {
 	struct sr_sw_limits limits;
+	uint64_t requested_limit_samples;
 	uint64_t samplerate;
 	gboolean running;
 	uint64_t burst_count;
