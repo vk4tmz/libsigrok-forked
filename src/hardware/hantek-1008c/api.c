@@ -27,12 +27,55 @@ static const uint32_t devopts[] = {
 	SR_CONF_CONN | SR_CONF_GET,
 	SR_CONF_CONTINUOUS,
 	SR_CONF_LIMIT_SAMPLES | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_LIMIT_FRAMES | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_SAMPLERATE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 };
 
-static const uint64_t samplerates[] = {
-	H1008C_SAMPLERATE,
+struct h1008c_rate {
+	uint64_t samplerate;
+	uint8_t a3;
+	enum h1008c_acquisition_mode mode;
 };
+
+/*
+ * PulseView-facing CH1 rates.  Burst rates are hardware-validated.  Roll
+ * rates are the public hantek1008py nominal rates multiplied by its documented
+ * 4.56x one-active-channel factor, rounded to integer samples/s because
+ * SR_CONF_SAMPLERATE is uint64.  Sub-1 sample/s settings are intentionally not
+ * advertised.  Hardware validation of the roll rates remains required.
+ */
+static const struct h1008c_rate rate_table[] = {
+	{ UINT64_C(1),       0x22, H1008C_MODE_ROLL },
+	{ UINT64_C(2),       0x21, H1008C_MODE_ROLL },
+	{ UINT64_C(5),       0x20, H1008C_MODE_ROLL },
+	{ UINT64_C(9),       0x1f, H1008C_MODE_ROLL },
+	{ UINT64_C(23),      0x1e, H1008C_MODE_ROLL },
+	{ UINT64_C(50),      0x1d, H1008C_MODE_ROLL },
+	{ UINT64_C(100),     0x1c, H1008C_MODE_ROLL },
+	{ UINT64_C(201),     0x1b, H1008C_MODE_ROLL },
+	{ UINT64_C(401),     0x1a, H1008C_MODE_ROLL },
+	{ UINT64_C(1003),    0x19, H1008C_MODE_ROLL },
+	{ UINT64_C(2006),    0x18, H1008C_MODE_ROLL },
+	{ UINT64_C(800000),  0x11, H1008C_MODE_BURST },
+	{ UINT64_C(2400000), 0x0f, H1008C_MODE_BURST },
+};
+
+static const uint64_t samplerates[] = {
+	UINT64_C(1), UINT64_C(2), UINT64_C(5), UINT64_C(9), UINT64_C(23),
+	UINT64_C(50), UINT64_C(100), UINT64_C(201), UINT64_C(401),
+	UINT64_C(1003), UINT64_C(2006), UINT64_C(800000), UINT64_C(2400000),
+};
+
+static const struct h1008c_rate *find_rate(uint64_t samplerate)
+{
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(rate_table); i++) {
+		if (rate_table[i].samplerate == samplerate)
+			return &rate_table[i];
+	}
+	return NULL;
+}
 
 static GSList *scan(struct sr_dev_driver *di, GSList *options)
 {
@@ -95,6 +138,8 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 		devc = g_malloc0(sizeof(*devc));
 		sr_sw_limits_init(&devc->limits);
 		devc->samplerate = H1008C_SAMPLERATE;
+		devc->a3 = H1008C_A3_24MSPS;
+		devc->acquisition_mode = H1008C_MODE_BURST;
 		sdi->priv = devc;
 		devices = g_slist_append(devices, sdi);
 	}
@@ -119,6 +164,7 @@ static int config_get(uint32_t key, GVariant **data,
 		return SR_OK;
 	}
 	case SR_CONF_LIMIT_SAMPLES:
+	case SR_CONF_LIMIT_FRAMES:
 		return sr_sw_limits_config_get(&devc->limits, key, data);
 	case SR_CONF_SAMPLERATE:
 		*data = g_variant_new_uint64(devc->samplerate);
@@ -132,17 +178,25 @@ static int config_set(uint32_t key, GVariant *data,
 		const struct sr_dev_inst *sdi, const struct sr_channel_group *cg)
 {
 	struct dev_context *devc = sdi->priv;
-	uint64_t rate;
+	const struct h1008c_rate *rate;
+	uint64_t samplerate;
 	(void)cg;
 
-	if (key == SR_CONF_LIMIT_SAMPLES)
+	if (key == SR_CONF_LIMIT_SAMPLES || key == SR_CONF_LIMIT_FRAMES)
 		return sr_sw_limits_config_set(&devc->limits, key, data);
 	if (key != SR_CONF_SAMPLERATE)
 		return SR_ERR_NA;
-	rate = g_variant_get_uint64(data);
-	if (rate != H1008C_SAMPLERATE)
+	samplerate = g_variant_get_uint64(data);
+	rate = find_rate(samplerate);
+	if (!rate)
 		return SR_ERR_SAMPLERATE;
-	devc->samplerate = rate;
+	devc->samplerate = rate->samplerate;
+	devc->a3 = rate->a3;
+	devc->acquisition_mode = rate->mode;
+	sr_info("Selected %" PRIu64 " samples/s: %s mode, A3=%02x.",
+		devc->samplerate,
+		devc->acquisition_mode == H1008C_MODE_ROLL ? "roll" : "burst",
+		devc->a3);
 	return SR_OK;
 }
 
@@ -242,57 +296,32 @@ out:
 	g_free(path);
 }
 
-static int receive_frame(int fd, int revents, void *cb_data)
+static void calibrate_samples(const struct dev_context *devc,
+		float *samples, size_t count)
 {
-	struct sr_dev_inst *sdi = cb_data;
+	size_t i;
+
+	if (!devc->calibration_valid)
+		return;
+	for (i = 0; i < count; i++)
+		samples[i] = (float)((samples[i] - devc->calibration_zero_adc) *
+			devc->calibration_volts_per_count);
+}
+
+static void send_analog_samples(struct sr_dev_inst *sdi, float *samples,
+		size_t count, gboolean frame)
+{
 	struct dev_context *devc = sdi->priv;
 	struct sr_datafeed_packet packet;
 	struct sr_datafeed_analog analog;
 	struct sr_analog_encoding encoding;
 	struct sr_analog_meaning meaning;
 	struct sr_analog_spec spec;
-	float *samples, *gap_samples;
-	size_t count, gap_count, i;
-	uint64_t remain;
-	gint64 a4_start_us, delta_us, burst_us, gap_us;
-	int ret;
-
-	(void)fd;
-	(void)revents;
-	if (!devc->running)
-		return TRUE;
-
-	ret = h1008c_acquire_frame(sdi, &samples, &count, &a4_start_us);
-	if (ret != SR_OK) {
-		sr_err("Acquisition failed; stopping experimental Hantek 1008C stream.");
-		sr_dev_acquisition_stop(sdi);
-		return TRUE;
-	}
-
-	remain = count;
-	if (devc->limits.limit_samples) {
-		uint64_t left = devc->limits.limit_samples > devc->limits.samples_read ?
-			devc->limits.limit_samples - devc->limits.samples_read : 0;
-		remain = MIN((uint64_t)count, left);
-	}
-	if (!remain) {
-		g_free(samples);
-		sr_dev_acquisition_stop(sdi);
-		return TRUE;
-	}
-
-	if (devc->calibration_valid) {
-		size_t i;
-
-		for (i = 0; i < remain; i++)
-			samples[i] = (float)((samples[i] - devc->calibration_zero_adc) *
-				devc->calibration_volts_per_count);
-	}
 
 	sr_analog_init(&analog, &encoding, &meaning, &spec, 0);
 	packet.type = SR_DF_ANALOG;
 	packet.payload = &analog;
-	analog.num_samples = remain;
+	analog.num_samples = count;
 	analog.data = samples;
 	if (devc->calibration_valid) {
 		analog.meaning->mq = SR_MQ_VOLTAGE;
@@ -308,52 +337,74 @@ static int receive_frame(int fd, int revents, void *cb_data)
 	analog.meaning->mqflags = 0;
 	analog.meaning->channels = g_slist_append(NULL, sdi->channels->data);
 
-	/*
-	 * Experimental gap representation: preserve the 2.4 MS/s sample clock
-	 * while marking host/device dead time as NaN (missing, not measured).
-	 * Derive the gap from successive A4 acquisition-start timestamps.
-	 */
-	if (devc->previous_a4_start_valid && a4_start_us > devc->previous_a4_start_us) {
-		delta_us = a4_start_us - devc->previous_a4_start_us;
-		burst_us = (gint64)((devc->previous_burst_samples *
-			G_GINT64_CONSTANT(1000000) + H1008C_SAMPLERATE / 2) /
-			H1008C_SAMPLERATE);
-		gap_us = MAX(G_GINT64_CONSTANT(0), delta_us - burst_us);
-		gap_count = (size_t)((gap_us * (gint64)H1008C_SAMPLERATE +
-			G_GINT64_CONSTANT(500000)) / G_GINT64_CONSTANT(1000000));
-		if (gap_count) {
-			gap_samples = g_try_new(float, gap_count);
-			if (!gap_samples) {
-				g_slist_free(analog.meaning->channels);
-				g_free(samples);
-				return TRUE;
-			}
-			for (i = 0; i < gap_count; i++)
-				gap_samples[i] = NAN;
-			analog.num_samples = gap_count;
-			analog.data = gap_samples;
-			sr_session_send(sdi, &packet);
-			g_free(gap_samples);
-			sr_dbg("burst=%" PRIu64 " gap=%" G_GINT64_FORMAT
-				" us gap_samples=%zu start_delta=%" G_GINT64_FORMAT " us",
-				devc->burst_count + 1, gap_us, gap_count, delta_us);
-		}
-	}
-	devc->previous_a4_start_us = a4_start_us;
-	devc->previous_a4_start_valid = TRUE;
-	devc->previous_burst_samples = remain;
-
-	analog.num_samples = remain;
-	analog.data = samples;
+	if (frame)
+		std_session_send_df_frame_begin(sdi);
 	sr_session_send(sdi, &packet);
+	if (frame)
+		std_session_send_df_frame_end(sdi);
 	g_slist_free(analog.meaning->channels);
+}
+
+static int receive_samples(int fd, int revents, void *cb_data)
+{
+	struct sr_dev_inst *sdi = cb_data;
+	struct dev_context *devc = sdi->priv;
+	float *samples;
+	size_t count;
+	uint64_t remain;
+	gboolean frame;
+	int ret;
+
+	(void)fd;
+	(void)revents;
+	if (!devc->running)
+		return TRUE;
+
+	frame = devc->acquisition_mode == H1008C_MODE_BURST;
+	if (frame)
+		ret = h1008c_acquire_frame(sdi, devc->a3, &samples, &count);
+	else
+		ret = h1008c_read_roll(sdi, &samples, &count);
+	if (ret != SR_OK) {
+		sr_err("Hantek 1008C %s acquisition failed; stopping.",
+			frame ? "burst" : "roll");
+		sr_dev_acquisition_stop(sdi);
+		return TRUE;
+	}
+
+	/* C7 returning zero in roll mode simply means no samples are ready yet. */
+	if (!count)
+		return TRUE;
+
+	remain = count;
+	if (devc->limits.limit_samples) {
+		uint64_t left = devc->limits.limit_samples > devc->limits.samples_read ?
+			devc->limits.limit_samples - devc->limits.samples_read : 0;
+		remain = MIN((uint64_t)count, left);
+	}
+	if (!remain) {
+		g_free(samples);
+		sr_dev_acquisition_stop(sdi);
+		return TRUE;
+	}
+
+	calibrate_samples(devc, samples, remain);
+	send_analog_samples(sdi, samples, remain, frame);
 	g_free(samples);
 
-	devc->burst_count++;
 	sr_sw_limits_update_samples_read(&devc->limits, remain);
-	sr_dbg("burst=%" PRIu64 " samples=%" PRIu64 " total=%" PRIu64
-		" direct-adc",
-		devc->burst_count, remain, devc->limits.samples_read);
+	if (frame) {
+		devc->burst_count++;
+		sr_sw_limits_update_frames_read(&devc->limits, 1);
+		sr_dbg("burst=%" PRIu64 " frame=%" PRIu64 " samples=%" PRIu64
+			" total=%" PRIu64 " direct-adc",
+			devc->burst_count, devc->limits.frames_read, remain,
+			devc->limits.samples_read);
+	} else {
+		sr_dbg("roll samples=%" PRIu64 " total=%" PRIu64,
+			remain, devc->limits.samples_read);
+	}
+
 	if (sr_sw_limits_check(&devc->limits))
 		sr_dev_acquisition_stop(sdi);
 	return TRUE;
@@ -380,14 +431,21 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 		return SR_ERR;
 	devc->running = TRUE;
 	devc->burst_count = 0;
-	devc->previous_a4_start_us = 0;
-	devc->previous_a4_start_valid = FALSE;
-	devc->previous_burst_samples = 0;
 	sr_sw_limits_acquisition_start(&devc->limits);
 	std_session_send_df_header(sdi);
-	/* Synchronous MVP: each callback acquires one complete hardware burst. */
-	return sr_session_source_add(sdi->session, -1, 0, 1,
-		receive_frame, (struct sr_dev_inst *)sdi);
+	if (devc->acquisition_mode == H1008C_MODE_ROLL) {
+		if (h1008c_start_roll(sdi, devc->a3) != SR_OK) {
+			devc->running = FALSE;
+			return SR_ERR;
+		}
+	}
+	sr_info("Acquisition start: %" PRIu64 " samples/s, %s mode, A3=%02x.",
+		devc->samplerate,
+		devc->acquisition_mode == H1008C_MODE_ROLL ? "roll" : "burst",
+		devc->a3);
+	return sr_session_source_add(sdi->session, -1, 0,
+		devc->acquisition_mode == H1008C_MODE_ROLL ? 10 : 1,
+		receive_samples, (struct sr_dev_inst *)sdi);
 }
 
 static int dev_acquisition_stop(struct sr_dev_inst *sdi)

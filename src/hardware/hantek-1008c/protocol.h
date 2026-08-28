@@ -41,6 +41,11 @@
 #define H1008C_A3_24MSPS        0x0f
 #define H1008C_A2_RANGE_MVP     0x03
 
+enum h1008c_acquisition_mode {
+	H1008C_MODE_BURST = 0,
+	H1008C_MODE_ROLL,
+};
+
 struct dev_context {
 	struct sr_sw_limits limits;
 	uint64_t samplerate;
@@ -49,16 +54,18 @@ struct dev_context {
 	gboolean calibration_valid;
 	double calibration_zero_adc;
 	double calibration_volts_per_count;
-	gint64 previous_a4_start_us;
-	gboolean previous_a4_start_valid;
-	uint64_t previous_burst_samples;
+	uint8_t a3;
+	enum h1008c_acquisition_mode acquisition_mode;
 };
 
 SR_PRIV int h1008c_open(struct sr_dev_inst *sdi);
 SR_PRIV int h1008c_close(struct sr_dev_inst *sdi);
 SR_PRIV int h1008c_reopen(struct sr_dev_inst *sdi);
 SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi);
-SR_PRIV int h1008c_acquire_frame(const struct sr_dev_inst *sdi,
-		float **samples, size_t *sample_count, gint64 *a4_start_us);
+SR_PRIV int h1008c_acquire_frame(const struct sr_dev_inst *sdi, uint8_t a3,
+		float **samples, size_t *sample_count);
+SR_PRIV int h1008c_start_roll(const struct sr_dev_inst *sdi, uint8_t a3);
+SR_PRIV int h1008c_read_roll(const struct sr_dev_inst *sdi,
+		float **samples, size_t *sample_count);
 
 #endif

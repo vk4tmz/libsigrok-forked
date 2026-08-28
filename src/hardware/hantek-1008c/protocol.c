@@ -337,7 +337,7 @@ SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi)
 	return SR_OK;
 }
 
-static int prepare_direct_capture(const struct sr_dev_inst *sdi, gint64 *a4_start_us)
+static int prepare_direct_capture(const struct sr_dev_inst *sdi, uint8_t a3_id)
 {
 	static const uint8_t f3[] = { 0xf3 };
 	static const uint8_t e4[] = { 0xe4, 0x01 };
@@ -345,14 +345,13 @@ static int prepare_direct_capture(const struct sr_dev_inst *sdi, gint64 *a4_star
 	static const uint8_t a4[] = { 0xa4, 0x01 };
 	static const uint8_t c0[] = { 0xc0 };
 	static const uint8_t c2[] = { 0xc2 };
+	uint8_t a3[] = { 0xa3, a3_id };
 
 	if (command(sdi, f3, sizeof(f3)) != SR_OK ||
 	    command(sdi, e4, sizeof(e4)) != SR_OK ||
-	    command(sdi, e6, sizeof(e6)) != SR_OK)
-		return SR_ERR;
-	if (a4_start_us)
-		*a4_start_us = g_get_monotonic_time();
-	if (command(sdi, a4, sizeof(a4)) != SR_OK)
+	    command(sdi, e6, sizeof(e6)) != SR_OK ||
+	    command(sdi, a3, sizeof(a3)) != SR_OK ||
+	    command(sdi, a4, sizeof(a4)) != SR_OK)
 		return SR_ERR;
 	if (H1008C_BURST_ARM_DELAY_US)
 		g_usleep(H1008C_BURST_ARM_DELAY_US);
@@ -373,8 +372,8 @@ static int finish_direct_capture(const struct sr_dev_inst *sdi)
 	return SR_OK;
 }
 
-SR_PRIV int h1008c_acquire_frame(const struct sr_dev_inst *sdi,
-		float **samples, size_t *sample_count, gint64 *a4_start_us)
+SR_PRIV int h1008c_acquire_frame(const struct sr_dev_inst *sdi, uint8_t a3_id,
+		float **samples, size_t *sample_count)
 {
 	uint8_t *raw;
 	float *out;
@@ -383,9 +382,7 @@ SR_PRIV int h1008c_acquire_frame(const struct sr_dev_inst *sdi,
 
 	*samples = NULL;
 	*sample_count = 0;
-	if (a4_start_us)
-		*a4_start_us = 0;
-	if (prepare_direct_capture(sdi, a4_start_us) != SR_OK)
+	if (prepare_direct_capture(sdi, a3_id) != SR_OK)
 		return SR_ERR;
 	ret = read_current_buffers(sdi, &raw, &total);
 	if (finish_direct_capture(sdi) != SR_OK) {
@@ -408,5 +405,101 @@ SR_PRIV int h1008c_acquire_frame(const struct sr_dev_inst *sdi,
 
 	*samples = out;
 	*sample_count = n;
+	return SR_OK;
+}
+
+SR_PRIV int h1008c_start_roll(const struct sr_dev_inst *sdi, uint8_t a3_id)
+{
+	static const uint8_t f3[] = { 0xf3 };
+	static const uint8_t a4[] = { 0xa4, 0x02 };
+	static const uint8_t c0[] = { 0xc0 };
+	static const uint8_t c2[] = { 0xc2 };
+	uint8_t a3[] = { 0xa3, a3_id };
+
+	/*
+	 * Public hantek1008py sequence for continuous/roll acquisition:
+	 * A3 <roll-rate-id>, short settle, F3, A4 02, C0, C2.  Data is then
+	 * queried with C7 and drained with C8.  CH1-only roll records contain
+	 * CH1 plus one extra device word per row; the extra lane is discarded.
+	 */
+	if (command(sdi, a3, sizeof(a3)) != SR_OK)
+		return SR_ERR;
+	g_usleep(10 * 1000);
+	if (command(sdi, f3, sizeof(f3)) != SR_OK ||
+	    command(sdi, a4, sizeof(a4)) != SR_OK ||
+	    command(sdi, c0, sizeof(c0)) != SR_OK ||
+	    command(sdi, c2, sizeof(c2)) != SR_OK)
+		return SR_ERR;
+
+	sr_info("Hantek 1008C roll mode started (A3=%02x).", a3_id);
+	return SR_OK;
+}
+
+SR_PRIV int h1008c_read_roll(const struct sr_dev_inst *sdi,
+		float **samples, size_t *sample_count)
+{
+	static const uint8_t f3[] = { 0xf3 };
+	static const uint8_t c7[] = { 0xc7 };
+	static const uint8_t c8[] = { 0xc8 };
+	uint8_t rx[H1008C_USB_PACKET], *raw;
+	float *out;
+	uint16_t ready_len;
+	size_t done, rows, i;
+	int actual;
+
+	*samples = NULL;
+	*sample_count = 0;
+
+	if (command(sdi, f3, sizeof(f3)) != SR_OK)
+		return SR_ERR;
+	if (transact(sdi, c7, sizeof(c7), rx, sizeof(rx), &actual) != SR_OK)
+		return SR_ERR;
+	if (actual != 2) {
+		sr_err("C7 returned %d bytes, expected 2.", actual);
+		return SR_ERR;
+	}
+	ready_len = ((uint16_t)rx[0] << 8) | rx[1];
+	if (!ready_len)
+		return SR_OK;
+
+	/* One CH1 16-bit sample plus one extra 16-bit device word per row. */
+	if (ready_len % 4) {
+		sr_err("C7 returned %u roll bytes, not divisible by CH1+extra row size.",
+			ready_len);
+		return SR_ERR;
+	}
+	raw = g_try_malloc(ready_len);
+	if (!raw)
+		return SR_ERR_MALLOC;
+
+	done = 0;
+	while (done < ready_len) {
+		if (usb_write(sdi, c8, sizeof(c8)) != SR_OK ||
+		    usb_read(sdi, rx, sizeof(rx), &actual) != SR_OK) {
+			g_free(raw);
+			return SR_ERR;
+		}
+		if (actual != H1008C_USB_PACKET) {
+			sr_err("C8 returned %d bytes, expected 64.", actual);
+			g_free(raw);
+			return SR_ERR;
+		}
+		memcpy(raw + done, rx, MIN((size_t)actual, (size_t)ready_len - done));
+		done += MIN((size_t)actual, (size_t)ready_len - done);
+	}
+
+	rows = ready_len / 4;
+	out = g_try_new(float, rows);
+	if (!out) {
+		g_free(raw);
+		return SR_ERR_MALLOC;
+	}
+	for (i = 0; i < rows; i++)
+		out[i] = (float)(((uint16_t)raw[i * 4] |
+			((uint16_t)raw[i * 4 + 1] << 8)) & 0x0fff);
+	g_free(raw);
+
+	*samples = out;
+	*sample_count = rows;
 	return SR_OK;
 }
