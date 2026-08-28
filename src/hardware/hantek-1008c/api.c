@@ -176,8 +176,7 @@ static int receive_frame(int fd, int revents, void *cb_data)
 	struct sr_analog_spec spec;
 	float *samples;
 	size_t count;
-	float zero;
-	uint64_t remain;
+		uint64_t remain;
 	int ret;
 
 	(void)fd;
@@ -185,7 +184,7 @@ static int receive_frame(int fd, int revents, void *cb_data)
 	if (!devc->running)
 		return TRUE;
 
-	ret = h1008c_acquire_frame(sdi, &samples, &count, &zero);
+	ret = h1008c_acquire_frame(sdi, &samples, &count);
 	if (ret != SR_OK) {
 		sr_err("Acquisition failed; stopping experimental Hantek 1008C stream.");
 		sr_dev_acquisition_stop(sdi);
@@ -231,9 +230,9 @@ static int receive_frame(int fd, int revents, void *cb_data)
 	sr_sw_limits_update_samples_read(&devc->limits, remain);
 	sr_sw_limits_update_frames_read(&devc->limits, 1);
 	sr_dbg("burst=%" PRIu64 " frame=%" PRIu64 " samples=%" PRIu64
-		" total=%" PRIu64 " delta-zero=%.3f",
+		" total=%" PRIu64 " direct-adc",
 		devc->burst_count, devc->limits.frames_read, remain,
-		devc->limits.samples_read, zero);
+		devc->limits.samples_read);
 	if (sr_sw_limits_check(&devc->limits))
 		sr_dev_acquisition_stop(sdi);
 	return TRUE;

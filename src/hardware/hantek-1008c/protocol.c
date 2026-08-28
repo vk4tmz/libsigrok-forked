@@ -11,7 +11,6 @@
 
 #include <config.h>
 #include <string.h>
-#include <math.h>
 #include "protocol.h"
 
 static int usb_write(const struct sr_dev_inst *sdi, const uint8_t *buf, int len)
@@ -68,7 +67,6 @@ static int command(const struct sr_dev_inst *sdi, const uint8_t *tx, int tx_len)
 		sr_err("Command 0x%02x returned no data.", tx[0]);
 		return SR_ERR;
 	}
-	g_usleep(H1008C_CMD_DELAY_US);
 	return SR_OK;
 }
 
@@ -131,11 +129,6 @@ SR_PRIV int h1008c_close(struct sr_dev_inst *sdi)
 
 SR_PRIV int h1008c_reopen(struct sr_dev_inst *sdi)
 {
-	/*
-	 * Closing a stale libusb handle is harmless, and h1008c_open() locates
-	 * the current device by sdi->connection_id (physical USB port path), not
-	 * by the potentially changed USB address recorded during the first scan.
-	 */
 	h1008c_close(sdi);
 	if (h1008c_open(sdi) != SR_OK)
 		return SR_ERR;
@@ -143,69 +136,8 @@ SR_PRIV int h1008c_reopen(struct sr_dev_inst *sdi)
 	return SR_OK;
 }
 
-SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi)
-{
-	/* Exact known-good CH1/A2=03/2.4MS/s setup from the regression lab. */
-	static const uint8_t b9[] = { 0xb9, 0x01, 0xbf, 0x04, 0x00, 0x00 };
-	static const uint8_t b7[] = { 0xb7, 0x00 };
-	static const uint8_t bb[] = { 0xbb, 0x08, 0x00 };
-	static const uint8_t b0[] = { 0xb0 };
-	static const uint8_t f3[] = { 0xf3 };
-	static const uint8_t b5[] = { 0xb5 };
-	static const uint8_t b6[] = { 0xb6 };
-	static const uint8_t e5[] = { 0xe5 };
-	static const uint8_t f7[] = { 0xf7 };
-	static const uint8_t f8[] = { 0xf8 };
-	static const uint8_t fa[] = { 0xfa };
-	static const uint8_t f5[] = { 0xf5 };
-	static const uint8_t a0[] = { 0xa0, 0x01 };
-	static const uint8_t aa[] = { 0xaa, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-	static const uint8_t a3[] = { 0xa3, H1008C_A3_24MSPS };
-	static const uint8_t c1[] = { 0xc1, 0x00, 0x00 };
-	static const uint8_t a7[] = { 0xa7, 0x00, 0x00 };
-	static const uint8_t ac[] = { 0xac, 0x01, 0xf4, 0x00, 0x09, 0xc5, 0x00, 0x09, 0xc5 };
-	struct cmd { const uint8_t *data; int len; };
-	static const struct cmd cmds[] = {
-		{ b9, sizeof(b9) }, { b7, sizeof(b7) }, { bb, sizeof(bb) },
-		{ b0, sizeof(b0) }, { f3, sizeof(f3) }, { b5, sizeof(b5) },
-		{ b6, sizeof(b6) }, { e5, sizeof(e5) }, { f7, sizeof(f7) },
-		{ f8, sizeof(f8) }, { fa, sizeof(fa) }, { f5, sizeof(f5) },
-		{ a0, sizeof(a0) }, { aa, sizeof(aa) }, { a3, sizeof(a3) },
-		{ c1, sizeof(c1) }, { a7, sizeof(a7) }, { ac, sizeof(ac) },
-	};
-	size_t i;
-
-	for (i = 0; i < ARRAY_SIZE(cmds); i++) {
-		if (command(sdi, cmds[i].data, cmds[i].len) != SR_OK)
-			return SR_ERR;
-	}
-	return SR_OK;
-}
-
-static int prepare_capture(const struct sr_dev_inst *sdi)
-{
-	static const uint8_t f3[] = { 0xf3 };
-	static const uint8_t a2[] = { 0xa2, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03 };
-	static const uint8_t a4[] = { 0xa4, 0x01 };
-	static const uint8_t c0[] = { 0xc0 };
-	static const uint8_t c2[] = { 0xc2 };
-	static const uint8_t a5[] = { 0xa5, 0x5a };
-	struct cmd { const uint8_t *data; int len; };
-	static const struct cmd cmds[] = {
-		{ f3, sizeof(f3) }, { a2, sizeof(a2) }, { a4, sizeof(a4) },
-		{ c0, sizeof(c0) }, { c2, sizeof(c2) },
-		{ a5, sizeof(a5) }, { a5, sizeof(a5) },
-	};
-	size_t i;
-
-	for (i = 0; i < ARRAY_SIZE(cmds); i++) {
-		if (command(sdi, cmds[i].data, cmds[i].len) != SR_OK)
-			return SR_ERR;
-	}
-	return SR_OK;
-}
-
-static int get_buffer_size(const struct sr_dev_inst *sdi, uint8_t selector, uint16_t *size)
+static int get_buffer_size(const struct sr_dev_inst *sdi, uint8_t selector,
+		uint16_t *size)
 {
 	uint8_t tx[] = { 0xc6, selector };
 	uint8_t rx[H1008C_USB_PACKET];
@@ -218,8 +150,8 @@ static int get_buffer_size(const struct sr_dev_inst *sdi, uint8_t selector, uint
 		return SR_ERR;
 	}
 	*size = ((uint16_t)rx[0] << 8) | rx[1];
-	if (!*size || (*size & 1)) {
-		sr_err("C6 %02x returned invalid size %u.", selector, *size);
+	if (*size & 1) {
+		sr_err("C6 %02x returned odd size %u.", selector, *size);
 		return SR_ERR;
 	}
 	return SR_OK;
@@ -249,177 +181,226 @@ static int read_buffer(const struct sr_dev_inst *sdi, uint8_t selector,
 	return SR_OK;
 }
 
-static float estimate_delta_zero(const uint8_t *buf, size_t len)
+static int wait_ready(const struct sr_dev_inst *sdi)
 {
-	/* Match the proven Python continuous reconstructor: acquisition median. */
-	uint32_t hist[4096] = { 0 };
-	size_t i, count, mid1, mid2, seen;
-	uint16_t lo, hi;
+	static const uint8_t a5[] = { 0xa5, 0x5a };
+	uint8_t rx[H1008C_USB_PACKET];
+	int actual, i;
+	uint8_t state;
 
-	count = len / 2;
-	for (i = 0; i + 1 < len; i += 2) {
-		uint16_t v = ((uint16_t)buf[i] | ((uint16_t)buf[i + 1] << 8)) & 0x0fff;
-		hist[v]++;
-	}
-	if (!count)
-		return 0.0f;
-
-	mid1 = (count - 1) / 2;
-	mid2 = count / 2;
-	seen = 0;
-	lo = hi = 0;
-	for (i = 0; i < ARRAY_SIZE(hist); i++) {
-		if (!hist[i])
-			continue;
-		if (seen <= mid1 && mid1 < seen + hist[i])
-			lo = (uint16_t)i;
-		if (seen <= mid2 && mid2 < seen + hist[i]) {
-			hi = (uint16_t)i;
-			break;
+	for (i = 0; i < H1008C_A5_READY_POLLS; i++) {
+		if (transact(sdi, a5, sizeof(a5), rx, sizeof(rx), &actual) != SR_OK)
+			return SR_ERR;
+		state = actual > 0 ? rx[actual - 1] : 0xff;
+		if (state == 0x02 || state == 0x03) {
+			sr_dbg("A5 ready state=%u after %d poll(s).", state, i + 1);
+			return SR_OK;
 		}
-		seen += hist[i];
+		g_usleep(H1008C_A5_POLL_DELAY_US);
 	}
-	return ((float)lo + (float)hi) / 2.0f;
+
+	sr_err("A5 never reached ready state 2/3; device may need USB replug.");
+	return SR_ERR;
 }
 
-static float median_small(float *vals, size_t n)
-{
-	size_t i, j;
-	float tmp;
-
-	for (i = 1; i < n; i++) {
-		tmp = vals[i];
-		j = i;
-		while (j > 0 && vals[j - 1] > tmp) {
-			vals[j] = vals[j - 1];
-			j--;
-		}
-		vals[j] = tmp;
-	}
-	if (n & 1)
-		return vals[n / 2];
-	return (vals[n / 2 - 1] + vals[n / 2]) / 2.0f;
-}
-
-static void reconstruct_relative_counts(const uint8_t *buf, size_t len,
-		float zero, float *out)
-{
-	/*
-	 * Port of hantek1008c.analysis.reconstruct_continuous_delta().
-	 *
-	 * 1. Subtract the acquisition-local median raw word.
-	 * 2. Replace only implausibly large (>64 count) isolated deltas with the
-	 *    local median of neighbouring non-discontinuous deltas.
-	 * 3. Integrate the cleaned deltas.
-	 * 4. Remove the best-fit linear drift caused by sub-count zero error.
-	 *
-	 * No voltage calibration, display centring, smoothing, or sample-rate
-	 * normalisation is done here. Output remains experimental relative counts.
-	 */
-	const float discontinuity_limit = 64.0f;
-	float *deltas, *cleaned;
-	float acc, mx, my, num, den, slope, intercept;
-	size_t i, j, n, lo, hi, good_n;
-
-	n = len / 2;
-	deltas = g_try_new(float, n);
-	cleaned = g_try_new(float, n);
-	if (!deltas || !cleaned) {
-		g_free(deltas);
-		g_free(cleaned);
-		for (i = 0; i < n; i++)
-			out[i] = 0.0f;
-		return;
-	}
-
-	for (i = 0; i < n; i++) {
-		uint16_t v = ((uint16_t)buf[i * 2] | ((uint16_t)buf[i * 2 + 1] << 8)) & 0x0fff;
-		deltas[i] = (float)v - zero;
-		cleaned[i] = deltas[i];
-	}
-
-	for (i = 0; i < n; i++) {
-		float local[9];
-		if (fabsf(deltas[i]) <= discontinuity_limit)
-			continue;
-		lo = i > 4 ? i - 4 : 0;
-		hi = MIN(n, i + 5);
-		good_n = 0;
-		for (j = lo; j < hi; j++) {
-			if (fabsf(deltas[j]) <= discontinuity_limit)
-				local[good_n++] = deltas[j];
-		}
-		cleaned[i] = good_n ? median_small(local, good_n) : 0.0f;
-	}
-
-	acc = 0.0f;
-	for (i = 0; i < n; i++) {
-		acc += cleaned[i];
-		out[i] = acc;
-	}
-
-	if (n >= 2) {
-		mx = ((float)n - 1.0f) / 2.0f;
-		my = 0.0f;
-		for (i = 0; i < n; i++)
-			my += out[i];
-		my /= (float)n;
-		num = 0.0f;
-		den = 0.0f;
-		for (i = 0; i < n; i++) {
-			float dx = (float)i - mx;
-			num += dx * (out[i] - my);
-			den += dx * dx;
-		}
-		slope = den ? num / den : 0.0f;
-		intercept = my - slope * mx;
-		for (i = 0; i < n; i++)
-			out[i] -= intercept + slope * (float)i;
-	}
-
-	g_free(cleaned);
-	g_free(deltas);
-}
-
-SR_PRIV int h1008c_acquire_frame(const struct sr_dev_inst *sdi,
-		float **samples, size_t *sample_count, float *delta_zero)
+static int read_current_buffers(const struct sr_dev_inst *sdi,
+		uint8_t **raw, size_t *total)
 {
 	uint16_t size2, size3;
-	float zero;
-	uint8_t *raw;
-	float *out;
-	size_t total;
+	uint8_t *buf;
+	size_t len;
 
-	*samples = NULL;
-	*sample_count = 0;
-	if (prepare_capture(sdi) != SR_OK)
-		return SR_ERR;
+	*raw = NULL;
+	*total = 0;
 	if (get_buffer_size(sdi, 0x02, &size2) != SR_OK ||
 	    get_buffer_size(sdi, 0x03, &size3) != SR_OK)
 		return SR_ERR;
-
-	total = (size_t)size2 + size3;
-	raw = g_try_malloc(total);
-	if (!raw)
+	len = (size_t)size2 + size3;
+	if (!len || (len & 1)) {
+		sr_err("Invalid combined capture size %zu.", len);
+		return SR_ERR;
+	}
+	buf = g_try_malloc(len);
+	if (!buf)
 		return SR_ERR_MALLOC;
-	if (read_buffer(sdi, 0x02, raw, size2) != SR_OK ||
-	    read_buffer(sdi, 0x03, raw + size2, size3) != SR_OK) {
+	if ((size2 && read_buffer(sdi, 0x02, buf, size2) != SR_OK) ||
+	    (size3 && read_buffer(sdi, 0x03, buf + size2, size3) != SR_OK)) {
+		g_free(buf);
+		return SR_ERR;
+	}
+	*raw = buf;
+	*total = len;
+	return SR_OK;
+}
+
+static int calibration_pass(const struct sr_dev_inst *sdi, uint8_t range)
+{
+	uint8_t a2[] = { 0xa2, range, range, range, range, range, range, range, range };
+	static const uint8_t f3[] = { 0xf3 };
+	static const uint8_t a4[] = { 0xa4, 0x01 };
+	static const uint8_t c0[] = { 0xc0 };
+	static const uint8_t c2[] = { 0xc2 };
+	uint8_t *raw;
+	size_t total;
+
+	if (command(sdi, f3, sizeof(f3)) != SR_OK ||
+	    command(sdi, a2, sizeof(a2)) != SR_OK ||
+	    command(sdi, a4, sizeof(a4)) != SR_OK ||
+	    command(sdi, c0, sizeof(c0)) != SR_OK)
+		return SR_ERR;
+	g_usleep(H1008C_CAL_CAPTURE_DELAY_US);
+	if (command(sdi, c2, sizeof(c2)) != SR_OK || wait_ready(sdi) != SR_OK)
+		return SR_ERR;
+	if (read_current_buffers(sdi, &raw, &total) != SR_OK)
+		return SR_ERR;
+	sr_dbg("Calibration range %u consumed %zu bytes (%zu words).",
+		range, total, total / 2);
+	g_free(raw);
+	return SR_OK;
+}
+
+SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi)
+{
+	/* Full direct-ADC initialization validated against mfg92/hantek1008py. */
+	static const uint8_t b0[] = { 0xb0 };
+	static const uint8_t f3[] = { 0xf3 };
+	static const uint8_t b9[] = { 0xb9, 0x01, 0xb0, 0x04, 0x00, 0x00 };
+	static const uint8_t b7[] = { 0xb7, 0x00 };
+	static const uint8_t bb[] = { 0xbb, 0x08, 0x00 };
+	static const uint8_t b5[] = { 0xb5 };
+	static const uint8_t b6[] = { 0xb6 };
+	static const uint8_t e5[] = { 0xe5 };
+	static const uint8_t f7[] = { 0xf7 };
+	static const uint8_t f8[] = { 0xf8 };
+	static const uint8_t fa[] = { 0xfa };
+	static const uint8_t f5[] = { 0xf5 };
+	static const uint8_t a0_all[] = { 0xa0, 0x08 };
+	static const uint8_t aa_all[] = { 0xaa, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01 };
+	static const uint8_t a3_default[] = { 0xa3, 0x11 };
+	static const uint8_t c1[] = { 0xc1, 0x00, 0x00 };
+	static const uint8_t a7[] = { 0xa7, 0x00, 0x00 };
+	static const uint8_t ac_init[] = { 0xac, 0x01, 0xf4, 0x00, 0x09, 0xc5, 0x00, 0x09, 0xc5 };
+	static const uint8_t f6[] = { 0xf6 };
+	static const uint8_t a3_fast[] = { 0xa3, H1008C_A3_24MSPS };
+	static const uint8_t ac_pre[] = { 0xac, 0x00, 0xc8, 0x00, 0x02, 0xbd, 0x00, 0x02, 0xbd };
+	static const uint8_t e4[] = { 0xe4, 0x01 };
+	static const uint8_t e6[] = { 0xe6, 0x01 };
+	static const uint8_t a0_ch1[] = { 0xa0, 0x01 };
+	static const uint8_t aa_ch1[] = { 0xaa, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+	static const uint8_t a2_ch1[] = { 0xa2, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03 };
+	static const uint8_t ac_final[] = { 0xac, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x05, 0x79 };
+	static const uint8_t ab[] = { 0xab, 0x08, 0x00 };
+	static const uint8_t e9[] = { 0xe9 };
+	struct cmd { const uint8_t *data; int len; };
+	static const struct cmd init1_tail[] = {
+		{ f3, sizeof(f3) }, { b9, sizeof(b9) }, { b7, sizeof(b7) },
+		{ bb, sizeof(bb) }, { b5, sizeof(b5) }, { b6, sizeof(b6) },
+		{ e5, sizeof(e5) }, { f7, sizeof(f7) }, { f8, sizeof(f8) },
+		{ fa, sizeof(fa) }, { f5, sizeof(f5) }, { a0_all, sizeof(a0_all) },
+		{ aa_all, sizeof(aa_all) }, { a3_default, sizeof(a3_default) },
+		{ c1, sizeof(c1) }, { a7, sizeof(a7) }, { ac_init, sizeof(ac_init) },
+	};
+	static const struct cmd init3_tail[] = {
+		{ e5, sizeof(e5) }, { f7, sizeof(f7) }, { f8, sizeof(f8) },
+		{ fa, sizeof(fa) }, { a3_fast, sizeof(a3_fast) },
+		{ ac_pre, sizeof(ac_pre) }, { e4, sizeof(e4) }, { e6, sizeof(e6) },
+		{ f3, sizeof(f3) }, { a0_ch1, sizeof(a0_ch1) },
+		{ aa_ch1, sizeof(aa_ch1) }, { a2_ch1, sizeof(a2_ch1) },
+		{ a3_fast, sizeof(a3_fast) }, { c1, sizeof(c1) }, { a7, sizeof(a7) },
+		{ ac_final, sizeof(ac_final) }, { ab, sizeof(ab) }, { e9, sizeof(e9) },
+	};
+	size_t i;
+
+	if (command(sdi, b0, sizeof(b0)) != SR_OK)
+		return SR_ERR;
+	g_usleep(H1008C_INIT_B0_DELAY_US);
+	if (command(sdi, b0, sizeof(b0)) != SR_OK)
+		return SR_ERR;
+	for (i = 0; i < ARRAY_SIZE(init1_tail); i++) {
+		if (command(sdi, init1_tail[i].data, init1_tail[i].len) != SR_OK)
+			return SR_ERR;
+	}
+
+	for (i = 1; i <= 3; i++) {
+		if (calibration_pass(sdi, (uint8_t)i) != SR_OK)
+			return SR_ERR;
+	}
+
+	if (command(sdi, f6, sizeof(f6)) != SR_OK)
+		return SR_ERR;
+	g_usleep(H1008C_F6_DELAY_US);
+	for (i = 0; i < ARRAY_SIZE(init3_tail); i++) {
+		if (command(sdi, init3_tail[i].data, init3_tail[i].len) != SR_OK)
+			return SR_ERR;
+	}
+	sr_info("Hantek 1008C direct-ADC initialization complete (CH1, 2.4 MS/s).");
+	return SR_OK;
+}
+
+static int prepare_direct_capture(const struct sr_dev_inst *sdi)
+{
+	static const uint8_t f3[] = { 0xf3 };
+	static const uint8_t e4[] = { 0xe4, 0x01 };
+	static const uint8_t e6[] = { 0xe6, 0x01 };
+	static const uint8_t a4[] = { 0xa4, 0x01 };
+	static const uint8_t c0[] = { 0xc0 };
+	static const uint8_t c2[] = { 0xc2 };
+
+	if (command(sdi, f3, sizeof(f3)) != SR_OK ||
+	    command(sdi, e4, sizeof(e4)) != SR_OK ||
+	    command(sdi, e6, sizeof(e6)) != SR_OK ||
+	    command(sdi, a4, sizeof(a4)) != SR_OK)
+		return SR_ERR;
+	g_usleep(H1008C_BURST_ARM_DELAY_US);
+	if (command(sdi, c0, sizeof(c0)) != SR_OK ||
+	    command(sdi, c2, sizeof(c2)) != SR_OK || wait_ready(sdi) != SR_OK)
+		return SR_ERR;
+	return SR_OK;
+}
+
+static int finish_direct_capture(const struct sr_dev_inst *sdi)
+{
+	static const uint8_t e4[] = { 0xe4, 0x01 };
+	static const uint8_t e6[] = { 0xe6, 0x01 };
+
+	if (command(sdi, e4, sizeof(e4)) != SR_OK ||
+	    command(sdi, e6, sizeof(e6)) != SR_OK)
+		return SR_ERR;
+	return SR_OK;
+}
+
+SR_PRIV int h1008c_acquire_frame(const struct sr_dev_inst *sdi,
+		float **samples, size_t *sample_count)
+{
+	uint8_t *raw;
+	float *out;
+	size_t total, i, n;
+	int ret;
+
+	*samples = NULL;
+	*sample_count = 0;
+	if (prepare_direct_capture(sdi) != SR_OK)
+		return SR_ERR;
+	ret = read_current_buffers(sdi, &raw, &total);
+	if (finish_direct_capture(sdi) != SR_OK) {
 		g_free(raw);
 		return SR_ERR;
 	}
+	if (ret != SR_OK)
+		return ret;
 
-	zero = estimate_delta_zero(raw, total);
-	out = g_try_malloc((total / 2) * sizeof(*out));
+	n = total / 2;
+	out = g_try_new(float, n);
 	if (!out) {
 		g_free(raw);
 		return SR_ERR_MALLOC;
 	}
-	reconstruct_relative_counts(raw, total, zero, out);
+	for (i = 0; i < n; i++)
+		out[i] = (float)(((uint16_t)raw[i * 2] |
+			((uint16_t)raw[i * 2 + 1] << 8)) & 0x0fff);
 	g_free(raw);
 
 	*samples = out;
-	*sample_count = total / 2;
-	if (delta_zero)
-		*delta_zero = zero;
+	*sample_count = n;
 	return SR_OK;
 }

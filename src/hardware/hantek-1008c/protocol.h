@@ -2,7 +2,7 @@
  * This file is part of the libsigrok project.
  *
  * Experimental Hantek 1008C support, based on independently captured USB
- * transactions. The sample-value semantics are still under investigation.
+ * transactions and the public mfg92/hantek1008py initialization sequence.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -27,7 +27,13 @@
 #define H1008C_EP_IN            0x81
 #define H1008C_USB_PACKET       64
 #define H1008C_USB_TIMEOUT_MS   1000
-#define H1008C_CMD_DELAY_US     (30 * 1000)
+
+#define H1008C_INIT_B0_DELAY_US       (700 * 1000)
+#define H1008C_CAL_CAPTURE_DELAY_US   12400
+#define H1008C_F6_DELAY_US            213200
+#define H1008C_BURST_ARM_DELAY_US     15000
+#define H1008C_A5_POLL_DELAY_US       2000
+#define H1008C_A5_READY_POLLS         20
 
 #define H1008C_NUM_HW_CHANNELS  8
 #define H1008C_MVP_CHANNELS     1
@@ -47,6 +53,6 @@ SR_PRIV int h1008c_close(struct sr_dev_inst *sdi);
 SR_PRIV int h1008c_reopen(struct sr_dev_inst *sdi);
 SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi);
 SR_PRIV int h1008c_acquire_frame(const struct sr_dev_inst *sdi,
-		float **samples, size_t *sample_count, float *delta_zero);
+		float **samples, size_t *sample_count);
 
 #endif
