@@ -38,11 +38,13 @@ struct h1008c_rate {
 };
 
 /*
- * PulseView-facing CH1 rates.  Burst rates are hardware-validated.  Roll
- * rates are the public hantek1008py nominal rates multiplied by its documented
- * 4.56x one-active-channel factor, rounded to integer samples/s because
- * SR_CONF_SAMPLERATE is uint64.  Sub-1 sample/s settings are intentionally not
- * advertised.  Hardware validation of the roll rates remains required.
+ * PulseView-facing CH1 rates. Burst rates are hardware-validated. Diagnostic
+ * C7/C8 ROLL rates retain their established word0-only mapping. Official C9/CA
+ * Scan is exposed only for the independently validated A3=1A..1C region, using
+ * two temporally ordered CH1 observations per 4-byte row. Nominal Scan rates
+ * are 800/400/200 samples/s; measured host-side row cadences are about
+ * 398/199/99 rows/s and reference-tone timing validates the 2x observation
+ * interpretation. Sub-1 sample/s settings are intentionally not advertised.
  */
 static const struct h1008c_rate rate_table[] = {
 	{ UINT64_C(1),       0x22, H1008C_MODE_ROLL },
@@ -52,8 +54,11 @@ static const struct h1008c_rate rate_table[] = {
 	{ UINT64_C(23),      0x1e, H1008C_MODE_ROLL },
 	{ UINT64_C(50),      0x1d, H1008C_MODE_ROLL },
 	{ UINT64_C(100),     0x1c, H1008C_MODE_ROLL },
+	{ UINT64_C(200),     0x1c, H1008C_MODE_SCAN },
 	{ UINT64_C(201),     0x1b, H1008C_MODE_ROLL },
+	{ UINT64_C(400),     0x1b, H1008C_MODE_SCAN },
 	{ UINT64_C(401),     0x1a, H1008C_MODE_ROLL },
+	{ UINT64_C(800),     0x1a, H1008C_MODE_SCAN },
 	{ UINT64_C(1003),    0x19, H1008C_MODE_ROLL },
 	{ UINT64_C(2006),    0x18, H1008C_MODE_ROLL },
 	{ UINT64_C(800000),  0x11, H1008C_MODE_BURST },
@@ -62,8 +67,9 @@ static const struct h1008c_rate rate_table[] = {
 
 static const uint64_t samplerates[] = {
 	UINT64_C(1), UINT64_C(2), UINT64_C(5), UINT64_C(9), UINT64_C(23),
-	UINT64_C(50), UINT64_C(100), UINT64_C(201), UINT64_C(401),
-	UINT64_C(1003), UINT64_C(2006), UINT64_C(800000), UINT64_C(2400000),
+	UINT64_C(50), UINT64_C(100), UINT64_C(200), UINT64_C(201),
+	UINT64_C(400), UINT64_C(401), UINT64_C(800), UINT64_C(1003),
+	UINT64_C(2006), UINT64_C(800000), UINT64_C(2400000),
 };
 
 static const struct h1008c_rate *find_rate(uint64_t samplerate)
@@ -238,13 +244,15 @@ static int config_set(uint32_t key, GVariant *data,
 	/*
 	 * PulseView may set sample count and samplerate in either order. Re-apply
 	 * the user's requested sample limit after mode selection so BURST always
-	 * advertises an integral number of 4K frames while ROLL remains exact.
+	 * advertises an integral number of 4K frames while continuous ROLL/Scan
+	 * modes remain exact.
 	 */
 	if (apply_sample_limit(devc) != SR_OK)
 		return SR_ERR;
 	sr_info("Selected %" PRIu64 " samples/s: %s mode, A3=%02x.",
 		devc->samplerate,
-		devc->acquisition_mode == H1008C_MODE_ROLL ? "roll" : "burst",
+		devc->acquisition_mode == H1008C_MODE_BURST ? "burst" :
+		devc->acquisition_mode == H1008C_MODE_SCAN ? "scan" : "roll",
 		devc->a3);
 	return SR_OK;
 }
@@ -412,16 +420,19 @@ static int receive_samples(int fd, int revents, void *cb_data)
 	frame = devc->acquisition_mode == H1008C_MODE_BURST;
 	if (frame)
 		ret = h1008c_acquire_frame(sdi, &samples, &count);
+	else if (devc->acquisition_mode == H1008C_MODE_SCAN)
+		ret = h1008c_read_scan(sdi, &samples, &count);
 	else
 		ret = h1008c_read_roll(sdi, &samples, &count);
 	if (ret != SR_OK) {
 		sr_err("Hantek 1008C %s acquisition failed; stopping.",
-			frame ? "burst" : "roll");
+			frame ? "burst" :
+			devc->acquisition_mode == H1008C_MODE_SCAN ? "scan" : "roll");
 		sr_dev_acquisition_stop(sdi);
 		return TRUE;
 	}
 
-	/* C7 returning zero in roll mode simply means no samples are ready yet. */
+	/* Empty continuous ROLL/Scan polls simply mean no samples are ready yet. */
 	if (!count)
 		return TRUE;
 
@@ -460,7 +471,8 @@ static int receive_samples(int fd, int revents, void *cb_data)
 			devc->burst_count, devc->limits.frames_read, remain,
 			devc->limits.samples_read);
 	} else {
-		sr_dbg("roll samples=%" PRIu64 " total=%" PRIu64,
+		sr_dbg("%s samples=%" PRIu64 " total=%" PRIu64,
+			devc->acquisition_mode == H1008C_MODE_SCAN ? "scan" : "roll",
 			remain, devc->limits.samples_read);
 	}
 
@@ -500,18 +512,25 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 	devc->burst_count = 0;
 	sr_sw_limits_acquisition_start(&devc->limits);
 	std_session_send_df_header(sdi);
+	devc->scan_carry_len = 0;
 	if (devc->acquisition_mode == H1008C_MODE_ROLL) {
 		if (h1008c_start_roll(sdi, devc->a3) != SR_OK) {
+			devc->running = FALSE;
+			return SR_ERR;
+		}
+	} else if (devc->acquisition_mode == H1008C_MODE_SCAN) {
+		if (h1008c_start_scan(sdi, devc->a3) != SR_OK) {
 			devc->running = FALSE;
 			return SR_ERR;
 		}
 	}
 	sr_info("Acquisition start: %" PRIu64 " samples/s, %s mode, A3=%02x.",
 		devc->samplerate,
-		devc->acquisition_mode == H1008C_MODE_ROLL ? "roll" : "burst",
+		devc->acquisition_mode == H1008C_MODE_BURST ? "burst" :
+		devc->acquisition_mode == H1008C_MODE_SCAN ? "scan" : "roll",
 		devc->a3);
 	return sr_session_source_add(sdi->session, -1, 0,
-		devc->acquisition_mode == H1008C_MODE_ROLL ? 10 : 1,
+		devc->acquisition_mode == H1008C_MODE_BURST ? 1 : 5,
 		receive_samples, (struct sr_dev_inst *)sdi);
 }
 

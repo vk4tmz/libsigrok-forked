@@ -44,6 +44,7 @@
 enum h1008c_acquisition_mode {
 	H1008C_MODE_BURST = 0,
 	H1008C_MODE_ROLL,
+	H1008C_MODE_SCAN,
 };
 
 struct dev_context {
@@ -57,6 +58,8 @@ struct dev_context {
 	double calibration_volts_per_count;
 	uint8_t a3;
 	enum h1008c_acquisition_mode acquisition_mode;
+	uint8_t scan_carry[4];
+	size_t scan_carry_len;
 };
 
 SR_PRIV int h1008c_open(struct sr_dev_inst *sdi);
@@ -67,6 +70,9 @@ SR_PRIV int h1008c_acquire_frame(const struct sr_dev_inst *sdi,
 		float **samples, size_t *sample_count);
 SR_PRIV int h1008c_start_roll(const struct sr_dev_inst *sdi, uint8_t a3);
 SR_PRIV int h1008c_read_roll(const struct sr_dev_inst *sdi,
+		float **samples, size_t *sample_count);
+SR_PRIV int h1008c_start_scan(const struct sr_dev_inst *sdi, uint8_t a3);
+SR_PRIV int h1008c_read_scan(const struct sr_dev_inst *sdi,
 		float **samples, size_t *sample_count);
 
 #endif

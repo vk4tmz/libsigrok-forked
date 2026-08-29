@@ -504,3 +504,137 @@ SR_PRIV int h1008c_read_roll(const struct sr_dev_inst *sdi,
 	*sample_count = rows;
 	return SR_OK;
 }
+
+SR_PRIV int h1008c_start_scan(const struct sr_dev_inst *sdi, uint8_t a3_id)
+{
+	static const uint8_t ac[] = {
+		0xac, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01
+	};
+	static const uint8_t f3[] = { 0xf3 };
+	static const uint8_t a4[] = { 0xa4, 0x01 };
+	static const uint8_t e4[] = { 0xe4, 0x01 };
+	static const uint8_t e6[] = { 0xe6, 0x01 };
+	static const uint8_t c0[] = { 0xc0 };
+	static const uint8_t c2[] = { 0xc2 };
+	static const uint8_t a5[] = { 0xa5, 0x5a };
+	uint8_t a3[] = { 0xa3, a3_id };
+	gint64 deadline;
+
+	/*
+	 * Official Windows Scan Mode boundary and the Python protocol reference
+	 * agree on this sequence for A3=1A..1C: selected A3, AC 0/1/1,
+	 * F3, A4 01, E4 01, E6 01, C0, then about 1.87 s of F3/A5 polling
+	 * before C2.  Keep this path independent of diagnostic A4 02 + C7/C8
+	 * ROLL; their identically sized 4-byte rows have different semantics.
+	 */
+	if (command(sdi, a3, sizeof(a3)) != SR_OK ||
+	    command(sdi, ac, sizeof(ac)) != SR_OK ||
+	    command(sdi, f3, sizeof(f3)) != SR_OK ||
+	    command(sdi, a4, sizeof(a4)) != SR_OK ||
+	    command(sdi, e4, sizeof(e4)) != SR_OK ||
+	    command(sdi, e6, sizeof(e6)) != SR_OK ||
+	    command(sdi, c0, sizeof(c0)) != SR_OK)
+		return SR_ERR;
+
+	deadline = g_get_monotonic_time() + G_TIME_SPAN_MILLISECOND * 1870;
+	while (g_get_monotonic_time() < deadline) {
+		if (command(sdi, f3, sizeof(f3)) != SR_OK ||
+		    command(sdi, a5, sizeof(a5)) != SR_OK)
+			return SR_ERR;
+		g_usleep(10 * 1000);
+	}
+	if (command(sdi, c2, sizeof(c2)) != SR_OK)
+		return SR_ERR;
+
+	sr_info("Hantek 1008C official Scan mode started (A3=%02x).", a3_id);
+	return SR_OK;
+}
+
+SR_PRIV int h1008c_read_scan(const struct sr_dev_inst *sdi,
+		float **samples, size_t *sample_count)
+{
+	static const uint8_t f3[] = { 0xf3 };
+	static const uint8_t a5[] = { 0xa5, 0x5a };
+	static const uint8_t c9[] = { 0xc9 };
+	static const uint8_t ca[] = { 0xca };
+	struct dev_context *devc = sdi->priv;
+	uint8_t rx[H1008C_USB_PACKET];
+	uint8_t framed[4 + H1008C_USB_PACKET];
+	float *out;
+	uint16_t available;
+	size_t total, complete, rows, i;
+	int actual;
+
+	*samples = NULL;
+	*sample_count = 0;
+
+	if (command(sdi, f3, sizeof(f3)) != SR_OK ||
+	    command(sdi, a5, sizeof(a5)) != SR_OK)
+		return SR_ERR;
+	if (transact(sdi, c9, sizeof(c9), rx, sizeof(rx), &actual) != SR_OK)
+		return SR_ERR;
+	if (actual != 2) {
+		sr_err("C9 returned %d bytes, expected 2.", actual);
+		return SR_ERR;
+	}
+	available = ((uint16_t)rx[0] << 8) | rx[1];
+	if (!available)
+		return SR_OK;
+
+	/*
+	 * Steady-state C9 values 1..64 describe the valid prefix of exactly one
+	 * fixed 64-byte CA response.  Larger startup values have different,
+	 * unresolved semantics; consume one CA packet to preserve device state but
+	 * quarantine it from the analogue stream.
+	 */
+	if (usb_write(sdi, ca, sizeof(ca)) != SR_OK ||
+	    usb_read(sdi, rx, sizeof(rx), &actual) != SR_OK)
+		return SR_ERR;
+	if (actual != H1008C_USB_PACKET) {
+		sr_err("CA returned %d bytes, expected 64.", actual);
+		return SR_ERR;
+	}
+	if (available > H1008C_USB_PACKET) {
+		sr_dbg("C9 startup/oversize value %u quarantined after one CA packet.",
+			available);
+		if (devc->scan_carry_len) {
+			sr_warn("Discarding %zu partial Scan byte(s) across "
+				"quarantined C9 discontinuity.", devc->scan_carry_len);
+			devc->scan_carry_len = 0;
+		}
+		return SR_OK;
+	}
+
+	memcpy(framed, devc->scan_carry, devc->scan_carry_len);
+	memcpy(framed + devc->scan_carry_len, rx, available);
+	total = devc->scan_carry_len + available;
+	complete = total - (total % 4);
+	devc->scan_carry_len = total - complete;
+	if (devc->scan_carry_len)
+		memcpy(devc->scan_carry, framed + complete, devc->scan_carry_len);
+	if (!complete)
+		return SR_OK;
+
+	rows = complete / 4;
+	out = g_try_new(float, rows * 2);
+	if (!out)
+		return SR_ERR_MALLOC;
+
+	/*
+	 * Grounded-input, cross-rate 20 Hz adjacency, and reference-tone timing
+	 * validation establish the C9/CA Scan temporal order as
+	 * word0[n], word1[n], word0[n+1], word1[n+1], ... .  Decode only that
+	 * structural ordering; do not filter, average, interpolate, or otherwise
+	 * modify acquired values.
+	 */
+	for (i = 0; i < rows; i++) {
+		out[i * 2] = (float)(((uint16_t)framed[i * 4] |
+			((uint16_t)framed[i * 4 + 1] << 8)) & 0x0fff);
+		out[i * 2 + 1] = (float)(((uint16_t)framed[i * 4 + 2] |
+			((uint16_t)framed[i * 4 + 3] << 8)) & 0x0fff);
+	}
+
+	*samples = out;
+	*sample_count = rows * 2;
+	return SR_OK;
+}

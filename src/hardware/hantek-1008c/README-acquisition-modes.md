@@ -387,3 +387,43 @@ any C9/CA production implementation is considered here.
 Do not transfer this two-observation rule to C7/C8 ROLL.  Direct C7/C8 testing
 has already established different word semantics, and production ROLL remains
 word0-only at the existing historical samplerates.
+
+### Initial production C9/CA Scan implementation (2026-08-29)
+
+The production driver now has a deliberately narrow official Scan path for the
+three independently validated settings only:
+
+| libsigrok samplerate | A3 | Official time/div | Transport |
+|---:|---:|---:|---|
+| 800 Sa/s | `0x1A` | 500 ms/div | `A4 01 + C9/CA` Scan |
+| 400 Sa/s | `0x1B` | 1 s/div | `A4 01 + C9/CA` Scan |
+| 200 Sa/s | `0x1C` | 2 s/div | `A4 01 + C9/CA` Scan |
+
+The advertised Scan rates are nominal observation rates.  Repeated host-side
+measurements saw about 398/199/99 four-byte rows per second, and the validated
+row interpretation provides two temporally ordered CH1 observations per row.
+A 20 Hz reference-tone check recovered 19.92/19.90/19.82 Hz across A3=1A/1B/1C
+when the interleaved stream was interpreted at twice the measured row cadence.
+
+Scan startup mirrors the evidence-backed Python reference sequence: selected
+A3, official Scan AC `0,1,1`, `F3`, `A4 01`, `E4 01`, `E6 01`, `C0`, about
+1.87 seconds of repeated `F3/A5` observation, then `C2`.  Steady-state reads use
+`F3`, `A5 5A`, `C9`, and exactly one fixed 64-byte `CA` transaction when C9 is
+non-zero.  C9 values 1..64 select the valid CA prefix.  Values above 64 remain
+quarantined as unresolved startup/oversize conditions and are not emitted.
+
+The Scan decoder keeps a 0..3 byte carry across CA transaction boundaries and
+emits complete rows only.  A complete row is decoded structurally as
+`word0, word1`, producing the temporal sequence
+`word0[n], word1[n], word0[n+1], word1[n+1], ...`.  No averaging, smoothing,
+interpolation, thresholding, detrending or waveform-specific processing is
+performed.
+
+The existing diagnostic `A4 02 + C7/C8` ROLL implementation remains available
+at its existing word0-only samplerates, including 100/201/401 Sa/s for the same
+A3=1C/1B/1A values.  These ROLL rates are intentionally not doubled: direct
+20 Hz and grounded-input testing established different C7/C8 word semantics.
+
+This is the first production implementation and still requires direct
+libsigrok/sigrok-cli/PulseView hardware validation before expanding C9/CA Scan
+below A3=1C or replacing any additional low-rate path.
