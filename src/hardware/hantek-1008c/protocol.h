@@ -34,12 +34,18 @@
 #define H1008C_BURST_ARM_DELAY_US     0
 #define H1008C_A5_POLL_DELAY_US       2000
 #define H1008C_A5_READY_POLLS         100
+#define H1008C_AUTO_TRIGGER_TIMEOUT_US (1870 * 1000)
 
 #define H1008C_NUM_HW_CHANNELS  8
 #define H1008C_MVP_CHANNELS     1
 #define H1008C_SAMPLERATE       UINT64_C(2400000)
 #define H1008C_A3_24MSPS        0x0f
 #define H1008C_A2_RANGE_MVP     0x03
+
+enum h1008c_trigger_slope {
+	H1008C_TRIGGER_RISING = 0,
+	H1008C_TRIGGER_FALLING,
+};
 
 enum h1008c_acquisition_mode {
 	H1008C_MODE_BURST = 0,
@@ -58,6 +64,12 @@ struct dev_context {
 	double calibration_volts_per_count;
 	uint8_t a3;
 	enum h1008c_acquisition_mode acquisition_mode;
+	gboolean trigger_enabled;
+	enum h1008c_trigger_slope trigger_slope;
+	uint16_t trigger_level_adc;
+	gboolean burst_armed;
+	gboolean burst_forced;
+	gint64 burst_arm_us;
 	uint8_t scan_carry[4];
 	size_t scan_carry_len;
 };
@@ -68,6 +80,7 @@ SR_PRIV int h1008c_reopen(struct sr_dev_inst *sdi);
 SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi, uint8_t selected_a3);
 SR_PRIV int h1008c_acquire_frame(const struct sr_dev_inst *sdi,
 		float **samples, size_t *sample_count);
+SR_PRIV int h1008c_abort_frame(const struct sr_dev_inst *sdi);
 SR_PRIV int h1008c_start_roll(const struct sr_dev_inst *sdi, uint8_t a3);
 SR_PRIV int h1008c_read_roll(const struct sr_dev_inst *sdi,
 		float **samples, size_t *sample_count);

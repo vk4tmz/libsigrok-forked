@@ -286,10 +286,37 @@ The same official captures establish these trigger controls:
 
 - `AB hi lo`: vertical trigger threshold, big-endian 16-bit ADC-domain value.
 - `AC [u16] [u24] [u24]`: horizontal acquisition-window / trigger-position data; the u24 pair partitions the total horizontal window.
-- `C1 00 xx`: Edge-trigger slope/polarity. A dedicated `+/-` toggle capture produces alternating `C1 00 01` / `C1 00 00`. Do not label numeric polarity orientation until transition ordering is unambiguous.
-- Trigger Sweep `Auto / Normal / Single`: no dedicated new configuration opcode was proven; observed behaviour is consistent with acquisition/re-arm policy. Do not invent a sweep selector byte.
+- `C1 00 xx`: Edge-trigger slope/polarity. Correlation against the recorded Windows UI chronology (`+ -> - -> + -> - ... -> +`) proves `C1 00 00` = `+` / rising and `C1 00 01` = `-` / falling.
+- Trigger Sweep `Auto / Normal / Single`: no dedicated new configuration opcode was proven; observed behaviour is consistent with host acquisition/re-arm policy. Do not invent a sweep selector byte.
 
-These are protocol findings only. They do not authorize waveform-specific cleanup, smoothing, interpolation, or changes to canonical direct-ADC reconstruction.
+Controlled Linux tests then establish the arm/wait state machine. The correct
+initial sequence is `A4 01 -> C0`, followed by repeated `F3 / A5 5A` polling;
+`C2` must not be sent immediately after `C0`. With CH1 connected to a 1 kHz
+square wave and `AB=0860`, six of six captures reached A5 state 2 naturally in
+about 112--126 ms. With CH1 grounded and the same USB configuration, zero of
+four captures reached ready during 1.2 s, and a further grounded control stayed
+in A5 state 0 for 10004.4 ms until C2 was deliberately sent. This proves:
+
+- `C0` arms a genuine hardware-trigger wait;
+- A5 state 0 is waiting and A5 state 2 is completed/ready;
+- `C2` is a forced-completion action, not part of initial arming.
+
+For production libsigrok/PulseView integration, the agreed frontend mapping is:
+
+- no frontend trigger configured -> **Auto/free-running**: wait for a genuine
+  trigger up to the host Auto timeout, then use C2 only to force completion and
+  re-arm;
+- rising/falling trigger configured -> **Normal**: wait indefinitely with no
+  timeout C2, deliver the genuine triggered frame, then re-arm while Run remains
+  active;
+- ordinary Run is **not** interpreted as Single. The official Single capability
+  remains documented for possible future generic one-shot support rather than a
+  Hantek-specific frontend control.
+
+These findings do not authorize waveform-specific cleanup, smoothing,
+interpolation, or changes to canonical direct-ADC reconstruction. Production
+code should be changed only by deliberately promoting the proven Python
+reference semantics.
 
 
 ### AC A/B result at A3=11
@@ -600,3 +627,31 @@ exist today**, and it should remain generic rather than becoming a Hantek-only
 mode. The current samplerate-based PulseView presentation for the validated
 A3=1A..22 production profiles is satisfactory and should remain unchanged unless
 a broader timing design requires otherwise.
+
+## Production trigger policy
+
+The burst transport now uses the hardware trigger state machine instead of
+sending `C2` immediately after every `C0` arm.  The implementation keeps the
+A5 polling non-blocking so a frontend Stop remains responsive while a Normal
+trigger is waiting.
+
+- Trigger enablement is derived from libsigrok's **session trigger** (`struct sr_trigger`), not from merely setting the device `triggersource`/`triggerslope` configuration values. Those configuration values select source/slope defaults but do not themselves mean that a trigger is active.
+- The driver advertises `SR_CONF_TRIGGER_MATCH` with `SR_TRIGGER_RISING` and `SR_TRIGGER_FALLING` so sigrok frontends can construct a CH1 edge session trigger.
+- No session trigger: Auto/free-running policy.  Arm with `C0`, poll A5, accept
+  a genuine hardware completion when it arrives, otherwise send `C2` after the
+  official approximately 1.87 s Auto timeout and then read the forced frame.
+- One CH1 rising/falling session trigger: Normal policy.  Arm with `C0` and
+  poll A5 indefinitely; no timeout `C2` is sent.  After a genuine triggered
+  frame is read, the next acquisition callback re-arms automatically while
+  the session remains running.
+- `C1 00 00` is rising (`+`); `C1 00 01` is falling (`-`).
+- `AB` remains the ADC-domain trigger threshold.  The production driver keeps
+  the existing `0x0800` default while trigger-level frontend/configuration
+  semantics are resolved separately; do not invent a voltage mapping here.
+- Single/one-shot is a documented official-application policy but is not
+  mapped onto ordinary PulseView Run and is not exposed as a device-specific
+  sweep control.
+
+Hardware edge triggering is currently enabled only for the validated C6/A6
+burst family.  Official C9/CA Scan and diagnostic C7/C8 ROLL transport remain
+unchanged.

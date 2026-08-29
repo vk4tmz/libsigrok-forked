@@ -181,18 +181,35 @@ static int read_buffer(const struct sr_dev_inst *sdi, uint8_t selector,
 	return SR_OK;
 }
 
-static int wait_ready(const struct sr_dev_inst *sdi)
+static int poll_ready(const struct sr_dev_inst *sdi, gboolean *ready,
+		uint8_t *state_out)
 {
 	static const uint8_t a5[] = { 0xa5, 0x5a };
 	uint8_t rx[H1008C_USB_PACKET];
-	int actual, i;
+	int actual;
+	uint8_t state;
+
+	*ready = FALSE;
+	if (transact(sdi, a5, sizeof(a5), rx, sizeof(rx), &actual) != SR_OK)
+		return SR_ERR;
+	state = actual > 0 ? rx[actual - 1] : 0xff;
+	if (state_out)
+		*state_out = state;
+	if (state == 0x02 || state == 0x03)
+		*ready = TRUE;
+	return SR_OK;
+}
+
+static int wait_ready(const struct sr_dev_inst *sdi)
+{
+	int i;
+	gboolean ready;
 	uint8_t state;
 
 	for (i = 0; i < H1008C_A5_READY_POLLS; i++) {
-		if (transact(sdi, a5, sizeof(a5), rx, sizeof(rx), &actual) != SR_OK)
+		if (poll_ready(sdi, &ready, &state) != SR_OK)
 			return SR_ERR;
-		state = actual > 0 ? rx[actual - 1] : 0xff;
-		if (state == 0x02 || state == 0x03) {
+		if (ready) {
 			sr_dbg("A5 ready state=%u after %d poll(s).", state, i + 1);
 			return SR_OK;
 		}
@@ -338,24 +355,38 @@ SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi, uint8_t selected_a3)
 	return SR_OK;
 }
 
-static int prepare_direct_capture(const struct sr_dev_inst *sdi)
+static int arm_direct_capture(const struct sr_dev_inst *sdi)
 {
+	struct dev_context *devc = sdi->priv;
 	static const uint8_t f3[] = { 0xf3 };
 	static const uint8_t e4[] = { 0xe4, 0x01 };
 	static const uint8_t e6[] = { 0xe6, 0x01 };
 	static const uint8_t a4[] = { 0xa4, 0x01 };
 	static const uint8_t c0[] = { 0xc0 };
-	static const uint8_t c2[] = { 0xc2 };
-	if (command(sdi, f3, sizeof(f3)) != SR_OK ||
+	uint8_t c1[] = { 0xc1, 0x00, 0x00 };
+	uint8_t ab[] = { 0xab, 0x08, 0x00 };
+
+	c1[2] = devc->trigger_slope == H1008C_TRIGGER_RISING ? 0x00 : 0x01;
+	ab[1] = (uint8_t)(devc->trigger_level_adc >> 8);
+	ab[2] = (uint8_t)(devc->trigger_level_adc & 0xff);
+	if (command(sdi, c1, sizeof(c1)) != SR_OK ||
+	    command(sdi, ab, sizeof(ab)) != SR_OK ||
+	    command(sdi, f3, sizeof(f3)) != SR_OK ||
 	    command(sdi, e4, sizeof(e4)) != SR_OK ||
 	    command(sdi, e6, sizeof(e6)) != SR_OK ||
 	    command(sdi, a4, sizeof(a4)) != SR_OK)
 		return SR_ERR;
 	if (H1008C_BURST_ARM_DELAY_US)
 		g_usleep(H1008C_BURST_ARM_DELAY_US);
-	if (command(sdi, c0, sizeof(c0)) != SR_OK ||
-	    command(sdi, c2, sizeof(c2)) != SR_OK || wait_ready(sdi) != SR_OK)
+	if (command(sdi, c0, sizeof(c0)) != SR_OK)
 		return SR_ERR;
+	devc->burst_armed = TRUE;
+	devc->burst_forced = FALSE;
+	devc->burst_arm_us = g_get_monotonic_time();
+	sr_dbg("Burst armed: policy=%s slope=%s AB=%04x.",
+		devc->trigger_enabled ? "normal" : "auto",
+		devc->trigger_slope == H1008C_TRIGGER_RISING ? "rising" : "falling",
+		devc->trigger_level_adc);
 	return SR_OK;
 }
 
@@ -370,23 +401,70 @@ static int finish_direct_capture(const struct sr_dev_inst *sdi)
 	return SR_OK;
 }
 
+SR_PRIV int h1008c_abort_frame(const struct sr_dev_inst *sdi)
+{
+	struct dev_context *devc = sdi->priv;
+	static const uint8_t c2[] = { 0xc2 };
+
+	if (!devc->burst_armed)
+		return SR_OK;
+	if (!devc->burst_forced) {
+		sr_dbg("Aborting armed burst with C2.");
+		if (command(sdi, c2, sizeof(c2)) != SR_OK)
+			return SR_ERR;
+	} else {
+		sr_dbg("Clearing already-forced burst state during stop.");
+	}
+	devc->burst_armed = FALSE;
+	devc->burst_forced = FALSE;
+	devc->burst_arm_us = 0;
+	return SR_OK;
+}
+
 SR_PRIV int h1008c_acquire_frame(const struct sr_dev_inst *sdi,
 		float **samples, size_t *sample_count)
 {
+	struct dev_context *devc = sdi->priv;
+	static const uint8_t c2[] = { 0xc2 };
 	uint8_t *raw;
 	float *out;
 	size_t total, i, n;
+	gboolean ready;
+	uint8_t state;
+	gint64 elapsed;
 	int ret;
 
 	*samples = NULL;
 	*sample_count = 0;
-	if (prepare_direct_capture(sdi) != SR_OK)
+	if (!devc->burst_armed && arm_direct_capture(sdi) != SR_OK)
 		return SR_ERR;
+
+	if (poll_ready(sdi, &ready, &state) != SR_OK)
+		return SR_ERR;
+	if (!ready) {
+		elapsed = g_get_monotonic_time() - devc->burst_arm_us;
+		if (!devc->trigger_enabled && !devc->burst_forced &&
+		    elapsed >= H1008C_AUTO_TRIGGER_TIMEOUT_US) {
+			if (command(sdi, c2, sizeof(c2)) != SR_OK)
+				return SR_ERR;
+			devc->burst_forced = TRUE;
+			sr_dbg("Auto trigger timeout after %.1f ms; C2 forced completion.",
+				(double)elapsed / 1000.0);
+		}
+		return SR_OK;
+	}
+
+	sr_dbg("Burst ready state=%u after %.1f ms (%s).", state,
+		(double)(g_get_monotonic_time() - devc->burst_arm_us) / 1000.0,
+		devc->burst_forced ? "forced" : "hardware");
 	ret = read_current_buffers(sdi, &raw, &total);
 	if (finish_direct_capture(sdi) != SR_OK) {
 		g_free(raw);
 		return SR_ERR;
 	}
+	devc->burst_armed = FALSE;
+	devc->burst_forced = FALSE;
+	devc->burst_arm_us = 0;
 	if (ret != SR_OK)
 		return ret;
 

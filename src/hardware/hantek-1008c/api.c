@@ -29,6 +29,9 @@ static const uint32_t devopts[] = {
 	SR_CONF_LIMIT_SAMPLES | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_LIMIT_FRAMES | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_SAMPLERATE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_TRIGGER_SOURCE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_TRIGGER_SLOPE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_TRIGGER_MATCH | SR_CONF_LIST,
 };
 
 struct h1008c_rate {
@@ -76,6 +79,13 @@ static const uint64_t samplerates[] = {
 	UINT64_C(2), UINT64_C(4), UINT64_C(8), UINT64_C(20), UINT64_C(40),
 	UINT64_C(80), UINT64_C(200), UINT64_C(400), UINT64_C(800), UINT64_C(1003),
 	UINT64_C(2006), UINT64_C(800000), UINT64_C(2400000),
+};
+
+static const char *trigger_sources[] = { "CH1" };
+static const char *trigger_slopes[] = { "r", "f" };
+static const int32_t trigger_matches[] = {
+	SR_TRIGGER_RISING,
+	SR_TRIGGER_FALLING,
 };
 
 static const struct h1008c_rate *find_rate(uint64_t samplerate)
@@ -190,6 +200,9 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 		devc->samplerate = H1008C_SAMPLERATE;
 		devc->a3 = H1008C_A3_24MSPS;
 		devc->acquisition_mode = H1008C_MODE_BURST;
+		devc->trigger_enabled = FALSE;
+		devc->trigger_slope = H1008C_TRIGGER_RISING;
+		devc->trigger_level_adc = 0x0800;
 		sdi->priv = devc;
 		devices = g_slist_append(devices, sdi);
 	}
@@ -219,6 +232,13 @@ static int config_get(uint32_t key, GVariant **data,
 	case SR_CONF_SAMPLERATE:
 		*data = g_variant_new_uint64(devc->samplerate);
 		return SR_OK;
+	case SR_CONF_TRIGGER_SOURCE:
+		*data = g_variant_new_string("CH1");
+		return SR_OK;
+	case SR_CONF_TRIGGER_SLOPE:
+		*data = g_variant_new_string(
+			devc->trigger_slope == H1008C_TRIGGER_RISING ? "r" : "f");
+		return SR_OK;
 	default:
 		return SR_ERR_NA;
 	}
@@ -238,6 +258,21 @@ static int config_set(uint32_t key, GVariant *data,
 	}
 	if (key == SR_CONF_LIMIT_FRAMES)
 		return sr_sw_limits_config_set(&devc->limits, key, data);
+	if (key == SR_CONF_TRIGGER_SOURCE) {
+		if (g_strcmp0(g_variant_get_string(data, NULL), "CH1"))
+			return SR_ERR_ARG;
+		return SR_OK;
+	}
+	if (key == SR_CONF_TRIGGER_SLOPE) {
+		const char *slope = g_variant_get_string(data, NULL);
+		if (!strcmp(slope, "r"))
+			devc->trigger_slope = H1008C_TRIGGER_RISING;
+		else if (!strcmp(slope, "f"))
+			devc->trigger_slope = H1008C_TRIGGER_FALLING;
+		else
+			return SR_ERR_ARG;
+		return SR_OK;
+	}
 	if (key != SR_CONF_SAMPLERATE)
 		return SR_ERR_NA;
 	samplerate = g_variant_get_uint64(data);
@@ -268,6 +303,18 @@ static int config_list(uint32_t key, GVariant **data,
 {
 	if (key == SR_CONF_SAMPLERATE) {
 		*data = std_gvar_samplerates(ARRAY_AND_SIZE(samplerates));
+		return SR_OK;
+	}
+	if (key == SR_CONF_TRIGGER_SOURCE) {
+		*data = g_variant_new_strv(trigger_sources, ARRAY_SIZE(trigger_sources));
+		return SR_OK;
+	}
+	if (key == SR_CONF_TRIGGER_SLOPE) {
+		*data = g_variant_new_strv(trigger_slopes, ARRAY_SIZE(trigger_slopes));
+		return SR_OK;
+	}
+	if (key == SR_CONF_TRIGGER_MATCH) {
+		*data = std_gvar_array_i32(ARRAY_AND_SIZE(trigger_matches));
 		return SR_OK;
 	}
 	return STD_CONFIG_LIST(key, data, sdi, cg, scanopts, drvopts, devopts);
@@ -438,7 +485,7 @@ static int receive_samples(int fd, int revents, void *cb_data)
 		return TRUE;
 	}
 
-	/* Empty continuous ROLL/Scan polls simply mean no samples are ready yet. */
+	/* Empty polls mean no samples are ready yet, including an armed burst. */
 	if (!count)
 		return TRUE;
 
@@ -487,6 +534,49 @@ static int receive_samples(int fd, int revents, void *cb_data)
 	return TRUE;
 }
 
+static int configure_session_trigger(const struct sr_dev_inst *sdi)
+{
+	struct dev_context *devc = sdi->priv;
+	struct sr_trigger *trigger;
+	struct sr_trigger_stage *stage;
+	struct sr_trigger_match *match;
+
+	devc->trigger_enabled = FALSE;
+	trigger = sr_session_trigger_get(sdi->session);
+	if (!trigger || !trigger->stages)
+		return SR_OK;
+	if (trigger->stages->next) {
+		sr_err("Hantek 1008C supports one trigger stage only.");
+		return SR_ERR_ARG;
+	}
+	stage = trigger->stages->data;
+	if (!stage->matches || stage->matches->next) {
+		sr_err("Hantek 1008C supports one CH1 edge trigger match only.");
+		return SR_ERR_ARG;
+	}
+	match = stage->matches->data;
+	if (!match->channel || match->channel->index != 0 ||
+	    match->channel->type != SR_CHANNEL_ANALOG) {
+		sr_err("Hantek 1008C hardware trigger source is CH1 only.");
+		return SR_ERR_ARG;
+	}
+	if (match->match == SR_TRIGGER_RISING)
+		devc->trigger_slope = H1008C_TRIGGER_RISING;
+	else if (match->match == SR_TRIGGER_FALLING)
+		devc->trigger_slope = H1008C_TRIGGER_FALLING;
+	else {
+		sr_err("Hantek 1008C supports rising/falling hardware edge triggers only.");
+		return SR_ERR_ARG;
+	}
+	if (devc->acquisition_mode != H1008C_MODE_BURST) {
+		sr_err("Hantek 1008C hardware edge triggering is currently "
+			"supported in burst mode only.");
+		return SR_ERR_NA;
+	}
+	devc->trigger_enabled = TRUE;
+	return SR_OK;
+}
+
 static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 {
 	struct dev_context *devc = sdi->priv;
@@ -504,6 +594,8 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 	}
 
 	load_persistent_calibration(sdi);
+	if (configure_session_trigger(sdi) != SR_OK)
+		return SR_ERR;
 	/*
 	 * Keep the full startup/final configuration on the selected A3 for both
 	 * acquisition families.  The Python reference ROLL path is validated this
@@ -516,6 +608,9 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 		return SR_ERR;
 	devc->running = TRUE;
 	devc->burst_count = 0;
+	devc->burst_armed = FALSE;
+	devc->burst_forced = FALSE;
+	devc->burst_arm_us = 0;
 	sr_sw_limits_acquisition_start(&devc->limits);
 	std_session_send_df_header(sdi);
 	devc->scan_carry_len = 0;
@@ -530,11 +625,16 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 			return SR_ERR;
 		}
 	}
-	sr_info("Acquisition start: %" PRIu64 " samples/s, %s mode, A3=%02x.",
+	sr_info("Acquisition start: %" PRIu64
+		" samples/s, %s mode, A3=%02x, trigger=%s%s.",
 		devc->samplerate,
 		devc->acquisition_mode == H1008C_MODE_BURST ? "burst" :
 		devc->acquisition_mode == H1008C_MODE_SCAN ? "scan" : "roll",
-		devc->a3);
+		devc->a3,
+		devc->trigger_enabled ? "normal/edge" : "auto/free-running",
+		devc->trigger_enabled ?
+			(devc->trigger_slope == H1008C_TRIGGER_RISING ?
+			"/rising" : "/falling") : "");
 	return sr_session_source_add(sdi->session, -1, 0,
 		devc->acquisition_mode == H1008C_MODE_BURST ? 1 : 5,
 		receive_samples, (struct sr_dev_inst *)sdi);
@@ -543,12 +643,21 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 static int dev_acquisition_stop(struct sr_dev_inst *sdi)
 {
 	struct dev_context *devc = sdi->priv;
+	int ret;
 
 	if (!devc->running)
 		return SR_OK;
+	sr_dbg("Acquisition stop requested: mode=%d burst_armed=%s.",
+		devc->acquisition_mode, devc->burst_armed ? "yes" : "no");
+	if (devc->acquisition_mode == H1008C_MODE_BURST && devc->burst_armed) {
+		ret = h1008c_abort_frame(sdi);
+		if (ret != SR_OK)
+			sr_warn("Failed to abort armed burst during acquisition stop.");
+	}
 	devc->running = FALSE;
 	sr_session_source_remove(sdi->session, -1);
 	std_session_send_df_end(sdi);
+	sr_dbg("Acquisition stop complete.");
 	return SR_OK;
 }
 
