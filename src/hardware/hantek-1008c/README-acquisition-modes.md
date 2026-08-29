@@ -531,12 +531,35 @@ differences are consistent with the already-established Scan temporal ordering
 and do not show the distinct word split previously observed in diagnostic
 C7/C8 ROLL.
 
-A grounded-CH1 control remains to be run for A3=23..28. Production Scan remains
-limited to A3=1A..22 while the correct libsigrok representation of rates below
-1 Hz is resolved. Do not round or otherwise fake these profiles as integer
-`SR_CONF_SAMPLERATE` values; investigate timebase and/or sample-interval
-semantics instead. Existing C7/C8 ROLL and C6/A6 BURST behaviour remain
-unchanged.
+A second Python hardware campaign then exercised A3=23..28 with **CH1 grounded**
+for 60, 90, 150, 300, 600, and 1200 seconds respectively. The grounded ADC
+remained quiet across all profiles: spans were only 2--4 counts, population
+standard deviation was approximately 0.60--1.21 counts, and within-row and
+across-row adjacent differences stayed in the same small-noise regime. This is a
+useful quiet-input control for the existing interpretation that each Scan row
+contains two consecutive observations of the same analog input.
+
+Raw host timing from the grounded captures measured the steady four-byte CA
+periods at approximately 2.5, 5, 10, 25, 50, and 100 seconds for A3=23..28.
+Since each steady CA contains two observations, the hardware therefore confirms
+sample periods of 1.25, 2.5, 5, 12.5, 25, and 50 seconds, exactly matching the
+nominal 0.8, 0.4, 0.2, 0.08, 0.04, and 0.02 Sa/s rates. Short captures are
+consistently about three rows short relative to simple duration/rate arithmetic;
+inspection of the raw timing shows a repeatable startup pipeline latency of
+approximately three steady CA periods before the first partial observation is
+available. The steady-state cadence itself is not slow by that amount.
+
+Grounded framing remained exact throughout: the first non-empty CA carried a
+2-byte valid prefix, later CA transactions carried 4-byte valid prefixes, CA
+padding was zero, no oversize CA occurred, and captures ended with the expected
+2-byte carry. Together with the longer campaign, this closes Python hardware
+characterization of the official C9/CA Scan family through A3=28.
+
+Production Scan remains limited to A3=1A..22 while the correct libsigrok
+representation of rates below 1 Hz is resolved. Do not round or otherwise fake
+these profiles as integer `SR_CONF_SAMPLERATE` values; investigate timebase
+and/or sample-interval semantics instead. Existing C7/C8 ROLL and C6/A6 BURST
+behaviour remain unchanged.
 
 ### Future PulseView enhancement: ultra-slow data logging / charting
 
