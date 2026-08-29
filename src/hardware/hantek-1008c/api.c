@@ -39,17 +39,18 @@ struct h1008c_rate {
 
 /*
  * PulseView-facing CH1 rates. Burst rates are hardware-validated. Diagnostic
- * C7/C8 ROLL rates retain their established word0-only mapping. Official C9/CA
- * Scan is exposed only for the independently validated A3=1A..21 region, using
+ * C7/C8 ROLL rates retain their established word0-only mapping except that
+ * official Scan takes precedence at the shared public 2 samples/s setting.
+ * Official C9/CA Scan is exposed for the validated A3=1A..22 region, using
  * two temporally ordered CH1 observations per 4-byte row. Nominal Scan rates
- * are 800/400/200/80/40/20/8/4 samples/s; measured host-side row cadences
+ * are 800/400/200/80/40/20/8/4/2 samples/s; measured host-side row cadences
  * follow the corresponding 2x observation model, and reference-tone timing
  * validates that interpretation. Sub-1 sample/s settings are intentionally
  * not advertised.
  */
 static const struct h1008c_rate rate_table[] = {
 	{ UINT64_C(1),       0x22, H1008C_MODE_ROLL },
-	{ UINT64_C(2),       0x21, H1008C_MODE_ROLL },
+	{ UINT64_C(2),       0x22, H1008C_MODE_SCAN },
 	{ UINT64_C(4),       0x21, H1008C_MODE_SCAN },
 	{ UINT64_C(5),       0x20, H1008C_MODE_ROLL },
 	{ UINT64_C(8),       0x20, H1008C_MODE_SCAN },
@@ -72,10 +73,8 @@ static const struct h1008c_rate rate_table[] = {
 };
 
 static const uint64_t samplerates[] = {
-	UINT64_C(1), UINT64_C(2), UINT64_C(4), UINT64_C(5), UINT64_C(8),
-	UINT64_C(9), UINT64_C(20), UINT64_C(23), UINT64_C(40), UINT64_C(50),
-	UINT64_C(80), UINT64_C(100), UINT64_C(200), UINT64_C(201),
-	UINT64_C(400), UINT64_C(401), UINT64_C(800), UINT64_C(1003),
+	UINT64_C(2), UINT64_C(4), UINT64_C(8), UINT64_C(20), UINT64_C(40),
+	UINT64_C(80), UINT64_C(200), UINT64_C(400), UINT64_C(800), UINT64_C(1003),
 	UINT64_C(2006), UINT64_C(800000), UINT64_C(2400000),
 };
 
