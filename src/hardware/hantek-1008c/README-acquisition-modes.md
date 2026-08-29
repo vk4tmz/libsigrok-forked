@@ -285,3 +285,86 @@ The same official captures establish these trigger controls:
 
 These are protocol findings only. They do not authorize waveform-specific cleanup, smoothing, interpolation, or changes to canonical direct-ADC reconstruction.
 
+
+### AC A/B result at A3=11
+
+A controlled Python BURST A/B test compared the driver's historical final AC
+value `0,1,1401` with the official Windows A3=11 value `0,1,5001`, while
+holding CH1/A2/A3/A4 and the acquisition sequence constant.  Both settings
+reached ready state and returned the same physical acquisition geometry:
+buffer 02 empty, buffer 03 8000 bytes, 125 complete A6 packets and no trailing
+bytes.  This confirms that the official value is accepted but does not prove
+that samplerate-driven BURST should reproduce the official UI's AC mapping.
+The production AC value therefore remains unchanged pending evidence of a
+functional requirement.
+
+### Scan word0/word1 adjacency evidence
+
+Waveform-agnostic adjacency analysis of the preserved A3=1C official C9/CA
+Scan capture compares `word0[n] -> word1[n]` with the row-boundary transition
+`word1[n] -> word0[n+1]`.  Mean absolute deltas are about 1.096 and 1.000 ADC
+counts respectively, with very similar <=1-count populations and correlations
+of about 0.9985 and 0.9991.  There is therefore no observed numerical
+continuity break at the 4-byte row boundary.
+
+This is evidence consistent with the two words forming consecutive ADC-like
+observations in an interleaved stream, rather than one analogue value plus
+unrelated metadata.  It is not yet a production decoding rule.  In particular,
+the driver must not emit two samples per row, average the words, or otherwise
+reinterpret C7/C8 or C9/CA until the result is repeated across rates and its
+effective timing is reconciled with independent sample-rate measurements.
+
+### Official Scan temporal-order cross-rate evidence (2026-08-29)
+
+Controlled Python protocol-lab tests now provide stronger evidence for the
+4-byte official `A4 01 + C9/CA` Scan row.  With CH1 grounded, A3=1A, 1B and 1C
+showed no persistent separation between word0 and word1: all alternating and
+same-position adjacency classes collapsed to the same small ADC-noise regime.
+With CH1 driven by a 20 Hz sine, `word0[n] -> word1[n]` and
+`word1[n] -> word0[n+1]` had essentially identical mean absolute deltas at all
+three rates, while `word0[n] -> word0[n+1]` and `word1[n] -> word1[n+1]` were
+approximately twice as large.
+
+Measured Scan row rates and alternating-boundary results were:
+
+- A3=1A: 398.170 rows/s; within 2.3285 counts, across 2.3306 counts.
+- A3=1B: 198.993 rows/s; within 4.4623 counts, across 4.5069 counts.
+- A3=1C: 99.124 rows/s; within 8.8992 counts, across 8.8384 counts.
+
+This is strong evidence consistent with a temporal Scan sequence
+`word0[n], word1[n], word0[n+1], word1[n+1], ...`, implying approximately two
+ADC-like observations per 4-byte Scan row.  Do not transfer that interpretation
+to the production C7/C8 ROLL decoder yet: the C7/C8 transport must be tested
+independently with both raw row words preserved.  Production sample-rate
+mapping and emission remain unchanged pending that cross-check.
+
+### C7/C8 ROLL word-role cross-check (2026-08-29)
+
+The C9/CA Scan temporal interpretation was cross-checked directly against the
+separate diagnostic `A4 02 + C7/C8` ROLL transport rather than being transferred
+by analogy.  Raw 4-byte ROLL rows were preserved with both 16-bit positions and
+analysed with the same neutral adjacency metrics.
+
+With CH1 driven by a 20 Hz sine, word0 followed the changing analogue input
+while word1 remained nearly static.  Mean same-position row deltas were:
+
+- A3=1A (401 rows/s): word0 30.0287 counts, word1 0.93375 counts.
+- A3=1B (201 rows/s): word0 59.6008 counts, word1 1.19399 counts.
+- A3=1C (100 rows/s): word0 113.07 counts, word1 1.6775 counts.
+
+At all three rates the alternating word0/word1 boundaries were separated by
+about 259 counts, rather than showing the equal adjacent temporal spacing seen
+in C9/CA Scan.  A grounded-CH1 A3=1A control then reduced the word0 row-step to
+0.6927 count and word1 row-step to 0.6458 count, while the two row positions
+remained separated by about 249 counts.
+
+This is strong evidence that C7/C8 word0 and word1 have different semantics.
+The existing production ROLL path therefore remains correct to emit word0 only;
+word1 must not be treated as a second consecutive CH1 sample and the historical
+ROLL samplerates must not be doubled.  Word1 remains deliberately unnamed
+beyond "word1" because the current evidence does not establish whether it is
+metadata, status, another analogue quantity, or something else.
+
+The result also confirms that C9/CA Scan and C7/C8 ROLL can share 4-byte row
+geometry while carrying different row semantics.  Production acquisition is
+unchanged by this documentation update.
