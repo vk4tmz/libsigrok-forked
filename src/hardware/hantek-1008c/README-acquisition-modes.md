@@ -537,3 +537,43 @@ limited to A3=1A..22 while the correct libsigrok representation of rates below
 `SR_CONF_SAMPLERATE` values; investigate timebase and/or sample-interval
 semantics instead. Existing C7/C8 ROLL and C6/A6 BURST behaviour remain
 unchanged.
+
+### Future PulseView enhancement: ultra-slow data logging / charting
+
+The official Hantek Scan profiles below 1 Hz are a natural fit for a generic
+data-logging or chart-recorder presentation in PulseView. A3=23..28 correspond
+to nominal observation rates of 0.8, 0.4, 0.2, 0.08, 0.04, and 0.02 Sa/s, or
+approximately one observation every 1.25, 2.5, 5, 12.5, 25, and 50 seconds. At
+the slowest setting (`A3=0x28`, 20000 s/div), a ten-division horizontal record
+represents roughly 200000 seconds (about 55.6 hours), which is much closer to a
+chart recorder or data logger than to a conventional oscilloscope sweep.
+
+These modes can therefore be useful for long-duration analog trends such as
+battery charge/discharge, temperature and pressure changes, slow sensor drift,
+and intermittent automotive or instrumentation faults. The Hantek C9/CA Scan
+transport is well suited to that use because the device produces observations
+continuously at the selected hardware cadence while the host retrieves the
+available data. Host USB packet arrival times must not be substituted for the
+device's acquisition interval, because observations can be delivered in small
+batches and host polling adds scheduling jitter.
+
+Current PulseView timing is samplerate-oriented and the normal continuous-stream
+time axis is driven by integer `SR_CONF_SAMPLERATE` values. `SR_CONF_TIMEBASE`
+can describe the device's native horizontal setting, but by itself does not
+provide a fractional-Hz stream timing basis. `SR_CONF_SAMPLE_INTERVAL` is
+relevant prior art for slow instruments, but an integer-second interval cannot
+exactly represent all Hantek profiles (notably 1.25, 2.5, and 12.5 seconds).
+
+A useful future PulseView/libsigrok enhancement would therefore be a generic
+precise sample-period timing path for continuous analog data, ideally using a
+rational period/interval representation. PulseView could then place samples on
+the timeline as `sample_index * sample_period` and naturally display very slow
+streams as long-duration charts. For the Hantek this would permit exact timing
+for A3=23..28 without inventing integer sample rates, while also benefiting DMMs,
+temperature loggers, environmental sensors, and other sub-1-Hz instruments.
+
+This is a proposed future PulseView capability, **not functionality assumed to
+exist today**, and it should remain generic rather than becoming a Hantek-only
+mode. The current samplerate-based PulseView presentation for the validated
+A3=1A..22 production profiles is satisfactory and should remain unchanged unless
+a broader timing design requires otherwise.
