@@ -522,7 +522,7 @@ SR_PRIV int h1008c_start_scan(const struct sr_dev_inst *sdi, uint8_t a3_id)
 
 	/*
 	 * Official Windows Scan Mode boundary and the Python protocol reference
-	 * agree on this sequence for A3=1A..1C: selected A3, AC 0/1/1,
+	 * agree on this sequence for A3=1A..21: selected A3, AC 0/1/1,
 	 * F3, A4 01, E4 01, E6 01, C0, then about 1.87 s of F3/A5 polling
 	 * before C2.  Keep this path independent of diagnostic A4 02 + C7/C8
 	 * ROLL; their identically sized 4-byte rows have different semantics.

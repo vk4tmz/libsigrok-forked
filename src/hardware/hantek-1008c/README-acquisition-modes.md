@@ -30,9 +30,9 @@ application's Scan Mode.
 
 **Official Scan Mode** is used by the Windows application from 500 ms/div (`A3=1A`)
 and slower. It keeps `A4 01` and transfers a continuous byte stream using `C9/CA`.
-Linux protocol-lab captures have validated the stream framing and cadence for `A3=1A`,
-`1B`, and `1C`; exact semantics of the two words in each candidate row remain under
-investigation, so this transport is not yet exposed by the production driver.
+The production driver exposes the independently validated `A3=1A` through `21`
+settings as 800, 400, 200, 80, 40, 20, 8, and 4 Sa/s respectively. The two words in each 4-byte row
+are emitted as successive CH1 observations in their evidence-backed temporal order.
 
 ## Sample-rate and waveform guidance
 
@@ -133,13 +133,14 @@ The driver automatically selects acquisition mode from the requested samplerate.
 
 | Requested rate | Driver mode |
 |---:|---|
-| 1 Sa/s through 2.006 kSa/s | ROLL |
+| 1, 2, 5, 9, 23, 50, 100, 201, 401, 1003, 2006 Sa/s | ROLL |
+| 4, 8, 20, 40, 80, 200, 400, 800 Sa/s | official Scan |
 | 800 kSa/s | BURST |
 | 2.4 MSa/s | BURST |
 
 The current exposed one-channel samplerate list is:
 
-`1, 2, 5, 9, 23, 50, 100, 201, 401, 1003, 2006, 800000, 2400000 Sa/s`
+`1, 2, 4, 5, 8, 9, 20, 23, 40, 50, 80, 100, 200, 201, 400, 401, 800, 1003, 2006, 800000, 2400000 Sa/s`
 
 ### BURST representation in sigrok
 
@@ -391,19 +392,25 @@ word0-only at the existing historical samplerates.
 ### Initial production C9/CA Scan implementation (2026-08-29)
 
 The production driver now has a deliberately narrow official Scan path for the
-three independently validated settings only:
+eight independently validated settings only:
 
 | libsigrok samplerate | A3 | Official time/div | Transport |
 |---:|---:|---:|---|
 | 800 Sa/s | `0x1A` | 500 ms/div | `A4 01 + C9/CA` Scan |
 | 400 Sa/s | `0x1B` | 1 s/div | `A4 01 + C9/CA` Scan |
 | 200 Sa/s | `0x1C` | 2 s/div | `A4 01 + C9/CA` Scan |
+| 80 Sa/s | `0x1D` | 5 s/div | `A4 01 + C9/CA` Scan |
+| 40 Sa/s | `0x1E` | 10 s/div | `A4 01 + C9/CA` Scan |
+| 20 Sa/s | `0x1F` | 20 s/div | `A4 01 + C9/CA` Scan |
+| 8 Sa/s | `0x20` | 50 s/div | `A4 01 + C9/CA` Scan |
+| 4 Sa/s | `0x21` | 100 s/div | `A4 01 + C9/CA` Scan |
 
 The advertised Scan rates are nominal observation rates.  Repeated host-side
-measurements saw about 398/199/99 four-byte rows per second, and the validated
+measurements saw about 398/199/99/40 four-byte rows per second, and the validated
 row interpretation provides two temporally ordered CH1 observations per row.
 A 20 Hz reference-tone check recovered 19.92/19.90/19.82 Hz across A3=1A/1B/1C
-when the interleaved stream was interpreted at twice the measured row cadence.
+and 19.843/19.846 Hz in two A3=1D Python captures when the interleaved stream was
+interpreted at twice the measured row cadence.
 
 Scan startup mirrors the evidence-backed Python reference sequence: selected
 A3, official Scan AC `0,1,1`, `F3`, `A4 01`, `E4 01`, `E6 01`, `C0`, about
@@ -424,6 +431,47 @@ at its existing word0-only samplerates, including 100/201/401 Sa/s for the same
 A3=1C/1B/1A values.  These ROLL rates are intentionally not doubled: direct
 20 Hz and grounded-input testing established different C7/C8 word semantics.
 
-This is the first production implementation and still requires direct
-libsigrok/sigrok-cli/PulseView hardware validation before expanding C9/CA Scan
-below A3=1C or replacing any additional low-rate path.
+### Production hardware validation
+
+Official C9/CA Scan has passed real-hardware validation at all eight currently
+exposed production settings:
+
+| Rate | A3 | Official time/div | Validation |
+|---:|---:|---:|---|
+| 800 Sa/s | `0x1A` | 500 ms/div | `sigrok-cli` and PulseView |
+| 400 Sa/s | `0x1B` | 1 s/div | `sigrok-cli` and PulseView |
+| 200 Sa/s | `0x1C` | 2 s/div | `sigrok-cli` and PulseView |
+| 80 Sa/s | `0x1D` | 5 s/div | `sigrok-cli` and PulseView |
+| 40 Sa/s | `0x1E` | 10 s/div | `sigrok-cli` and PulseView |
+| 20 Sa/s | `0x1F` | 20 s/div | `sigrok-cli` and PulseView |
+| 8 Sa/s | `0x20` | 50 s/div | `sigrok-cli` and PulseView |
+| 4 Sa/s | `0x21` | 100 s/div | `sigrok-cli` and PulseView |
+
+Each check used the ATR2x-USB audio output: a 20 Hz reference for A3=1A through
+1D and a 1 Hz reference for A3=1E through 21. Both were reproduced at the
+expected cadence. The checks validate the existing waveform-agnostic production
+decode; they do not introduce smoothing, averaging, interpolation, thresholding,
+or other waveform-specific reconstruction.
+
+At A3=1D, two Python reference captures measured 79.374 and 79.383 observations/s
+and recovered 19.843 and 19.846 Hz. A grounded control measured 79.151
+observations/s with a four-count span. The production `sigrok-cli` capture then
+delivered exactly 800 samples at the advertised 80 Sa/s and recovered exactly
+20.000 Hz; PulseView showed the expected sparse approximately four-sample-per-cycle
+trace.
+
+The Python-first A3=1E/1F/20/21 batch used a 1 Hz ATR2x-USB reference and
+measured steady observation cadences of 40.1103, 20.1001, 8.10128, and 4.10395
+observations/s after excluding each profile's queued startup packet. Grounded
+controls had only 2--4 count spans, valid zero padding, and no unhandled C9
+event. Production `sigrok-cli` delivered exactly 800, 400, 160, and 80 samples
+at 40, 20, 8, and 4 Sa/s and recovered 1.000000, 0.999702, 1.000000, and
+1.000000 Hz without altering sample values. PulseView showed clean sine waves
+at 40 and 20 Sa/s, a coarse trace at 8 Sa/s, and an expected repeating roughly
+triangular four-samples-per-cycle trace at 4 Sa/s. This validates cadence and
+periodicity at the lowest rate, not high-fidelity waveform shape.
+
+Production Scan must not be expanded beyond A3=1A..21 until the next setting has
+first been investigated in the Python protocol/reference laboratory and then
+independently validated in libsigrok, `sigrok-cli`, and PulseView. Existing C7/C8
+ROLL and C6/A6 BURST behaviour remain unchanged.
