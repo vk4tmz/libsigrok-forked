@@ -368,3 +368,22 @@ metadata, status, another analogue quantity, or something else.
 The result also confirms that C9/CA Scan and C7/C8 ROLL can share 4-byte row
 geometry while carrying different row semantics.  Production acquisition is
 unchanged by this documentation update.
+
+### Python Scan reference-path promotion (2026-08-29)
+
+The evidence-backed Python protocol/reference path now decodes official
+`A4 01 + C9/CA` Scan rows as the temporal CH1 sequence
+`word0[n], word1[n], word0[n+1], word1[n+1], ...` and reports an observation
+cadence of two CH1 observations per measured 4-byte row.  This promotion is
+confined to the Python Scan reference path; it does not change the libsigrok
+production driver.
+
+The decode is structural only and performs no waveform-specific cleanup,
+smoothing, thresholding, interpolation, averaging, integration or detrending.
+A validation-only Python reference-tone analyzer is used to check the existing
+20 Hz ATR2x-USB Scan captures against the resulting observation cadence before
+any C9/CA production implementation is considered here.
+
+Do not transfer this two-observation rule to C7/C8 ROLL.  Direct C7/C8 testing
+has already established different word semantics, and production ROLL remains
+word0-only at the existing historical samplerates.
