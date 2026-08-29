@@ -486,9 +486,15 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 	}
 
 	load_persistent_calibration(sdi);
-	if (h1008c_startup(sdi,
-		devc->acquisition_mode == H1008C_MODE_BURST ?
-		devc->a3 : H1008C_A3_24MSPS) != SR_OK)
+	/*
+	 * Keep the full startup/final configuration on the selected A3 for both
+	 * acquisition families.  The Python reference ROLL path is validated this
+	 * way, and the official application likewise applies the selected A3 as
+	 * part of final initialization rather than substituting a burst-only rate.
+	 * h1008c_start_roll() deliberately sends the same A3 again immediately
+	 * before A4 02, matching the validated C7/C8 laboratory sequence.
+	 */
+	if (h1008c_startup(sdi, devc->a3) != SR_OK)
 		return SR_ERR;
 	devc->running = TRUE;
 	devc->burst_count = 0;

@@ -259,7 +259,7 @@ static int startup_range_pass(const struct sr_dev_inst *sdi, uint8_t range)
 	return SR_OK;
 }
 
-SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi, uint8_t burst_a3)
+SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi, uint8_t selected_a3)
 {
 	/* Full direct-ADC initialization validated against mfg92/hantek1008py. */
 	static const uint8_t b0[] = { 0xb0 };
@@ -281,7 +281,7 @@ SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi, uint8_t burst_a3)
 	static const uint8_t a7[] = { 0xa7, 0x00, 0x00 };
 	static const uint8_t ac_init[] = { 0xac, 0x01, 0xf4, 0x00, 0x09, 0xc5, 0x00, 0x09, 0xc5 };
 	static const uint8_t f6[] = { 0xf6 };
-	uint8_t a3_selected[] = { 0xa3, burst_a3 };
+	uint8_t a3_selected[] = { 0xa3, selected_a3 };
 	static const uint8_t ac_pre[] = { 0xac, 0x00, 0xc8, 0x00, 0x02, 0xbd, 0x00, 0x02, 0xbd };
 	static const uint8_t e4[] = { 0xe4, 0x01 };
 	static const uint8_t e6[] = { 0xe6, 0x01 };
@@ -334,7 +334,7 @@ SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi, uint8_t burst_a3)
 			return SR_ERR;
 	}
 	sr_info("Hantek 1008C direct-ADC initialization complete (CH1, A3=%02x).",
-		burst_a3);
+		selected_a3);
 	return SR_OK;
 }
 
@@ -417,8 +417,11 @@ SR_PRIV int h1008c_start_roll(const struct sr_dev_inst *sdi, uint8_t a3_id)
 	/*
 	 * Public hantek1008py sequence for continuous/roll acquisition:
 	 * A3 <roll-rate-id>, short settle, F3, A4 02, C0, C2.  Data is then
-	 * queried with C7 and drained with C8.  CH1-only roll records contain
-	 * CH1 plus one extra device word per row; the extra lane is discarded.
+	 * queried with C7 and drained with C8.  CH1-only roll transport is
+	 * framed in 4-byte rows.  The first word is the historically validated
+	 * CH1 lane used by this diagnostic path; newer C9/CA evidence shows that
+	 * the second word is also ADC-like, so its exact semantics remain open.
+	 * Do not reinterpret, average, or otherwise combine the two here.
 	 */
 	if (command(sdi, a3, sizeof(a3)) != SR_OK)
 		return SR_ERR;
@@ -460,9 +463,9 @@ SR_PRIV int h1008c_read_roll(const struct sr_dev_inst *sdi,
 	if (!ready_len)
 		return SR_OK;
 
-	/* One CH1 16-bit sample plus one extra 16-bit device word per row. */
+	/* Two 16-bit words per transport row; word1 semantics remain unresolved. */
 	if (ready_len % 4) {
-		sr_err("C7 returned %u roll bytes, not divisible by CH1+extra row size.",
+		sr_err("C7 returned %u roll bytes, not divisible by the 4-byte transport row size.",
 			ready_len);
 		return SR_ERR;
 	}

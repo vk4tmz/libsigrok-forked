@@ -222,6 +222,18 @@ The official application still uses `A4 01` in the observed C9/CA Scan Mode. The
 the driver's existing low-rate `A4 02 + C7/C8` ROLL implementation is a different
 mechanism and must not be renamed or treated as official Scan Mode.
 
+
+### Startup A3 synchronization
+
+The Python C7/C8 ROLL reference path performs the complete startup/final
+configuration using the selected low-rate A3 value and then sends that same A3
+again immediately before the `A4 02` ROLL arm sequence.  libsigrok now mirrors
+that validated flow.  It no longer substitutes `A3=0F` during full startup when
+a low-rate ROLL samplerate was selected.
+
+This is an existing-flow synchronization fix; it does not enable official
+`C9/CA` Scan Mode and it does not change BURST sequencing.
+
 ### Linux C9/CA Scan validation
 
 The Python protocol-laboratory path now independently reproduces the official
