@@ -492,7 +492,48 @@ at 2 Sa/s and recovered 0.200244 Hz. PulseView showed the expected roughly
 ten-sample-per-cycle sine after its display scale was manually changed from the
 initial 20 V/div to 2 V/div. Display scaling did not alter acquisition data.
 
-Production Scan must not be expanded beyond A3=1A..22 until the next setting has
-first been investigated in the Python protocol/reference laboratory and then
-independently validated in libsigrok, `sigrok-cli`, and PulseView. Existing C7/C8
-ROLL and C6/A6 BURST behaviour remain unchanged.
+### Ultra-slow Python protocol/cadence validation: A3=23 through A3=28 (2026-08-29)
+
+The Python protocol/reference path has now exercised every remaining official
+Windows Scan profile through A3=28. A3=23 used a 600-second capture; A3=24..28
+used 600, 900, 1500, 2500, and 5000 seconds respectively. CH1 was connected to
+the ATR2x-USB audio output. These are protocol/cadence validations, not yet
+production libsigrok or PulseView validations.
+
+| A3 | Official time/div | Nominal observation rate | Measured observation rate | Complete rows | Final carry | Oversize CA |
+|---:|---:|---:|---:|---:|---:|---:|
+| `0x23` | 500 s/div | 0.8 Sa/s | 0.790 Sa/s | 237 | 2 B | 0 |
+| `0x24` | 1000 s/div | 0.4 Sa/s | 0.390 Sa/s | 117 | 2 B | 0 |
+| `0x25` | 2000 s/div | 0.2 Sa/s | 0.193 Sa/s | 87 | 2 B | 0 |
+| `0x26` | 5000 s/div | 0.08 Sa/s | 0.076 Sa/s | 57 | 2 B | 0 |
+| `0x27` | 10000 s/div | 0.04 Sa/s | 0.038 Sa/s | 47 | 2 B | 0 |
+| `0x28` | 20000 s/div | 0.02 Sa/s | 0.019 Sa/s | 47 | 2 B | 0 |
+
+Every capture retained the same C9/CA framing semantics: the first non-empty CA
+transaction supplied a two-byte valid prefix, steady transactions supplied
+four-byte valid prefixes, padding was zero, and no oversize CA transaction was
+observed. At A3=28, for example, one 2-byte prefix plus 47 four-byte prefixes
+produced exactly 190 bytes = 95 16-bit observations = 47 complete rows plus a
+two-byte capture-end carry.
+
+Regular four-byte CA arrivals were approximately 2.5, 5, 10, 25, 50, and 100
+seconds apart for A3=23..28, corresponding to approximately 1.25, 2.5, 5, 12.5,
+25, and 50 seconds per observation. This supports one continuous official C9/CA
+Scan family from A3=1A through A3=28 and confirms that the final profiles are
+genuinely fractional-Hz acquisitions.
+
+The attempted 0.001 Hz ATR2x-USB reference is **not** treated as waveform
+validation. The audio output did not produce a meaningful near-DC reference;
+for example, A3=28 occupied only ADC codes 2027..2037 (10-count span, population
+standard deviation approximately 2.34 counts) during the 5000-second run. The
+run therefore establishes framing and cadence only. Its quiet sequential
+differences are consistent with the already-established Scan temporal ordering
+and do not show the distinct word split previously observed in diagnostic
+C7/C8 ROLL.
+
+A grounded-CH1 control remains to be run for A3=23..28. Production Scan remains
+limited to A3=1A..22 while the correct libsigrok representation of rates below
+1 Hz is resolved. Do not round or otherwise fake these profiles as integer
+`SR_CONF_SAMPLERATE` values; investigate timebase and/or sample-interval
+semantics instead. Existing C7/C8 ROLL and C6/A6 BURST behaviour remain
+unchanged.
