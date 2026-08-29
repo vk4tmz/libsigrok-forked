@@ -1,8 +1,8 @@
 /*
  * This file is part of the libsigrok project.
  *
- * Experimental Hantek 1008C support, based on independently captured USB
- * transactions and the public mfg92/hantek1008py initialization sequence.
+ * Hantek 1008C support, based on independently captured USB transactions and
+ * the public mfg92/hantek1008py initialization sequence.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by

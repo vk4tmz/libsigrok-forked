@@ -127,6 +127,7 @@ The following drivers/devices do not need any firmware upload:
  - gwinstek-gds-800
  - gwinstek-gpd
  - hameg-hmo
+ - hantek-1008c
  - hantek-4032l
  - hp-3457a
  - hp-3478a

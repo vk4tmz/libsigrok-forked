@@ -1,7 +1,7 @@
 /*
  * This file is part of the libsigrok project.
  *
- * Experimental Hantek 1008C driver MVP.
+ * Hantek 1008C oscilloscope driver.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -177,13 +177,13 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 		sdi->driver = &hantek_1008c_driver_info;
 		sdi->status = SR_ST_INACTIVE;
 		sdi->vendor = g_strdup("Hantek");
-		sdi->model = g_strdup("1008C (experimental)");
+		sdi->model = g_strdup("1008C");
 		sdi->connection_id = g_strdup(connection_id);
 		sdi->inst_type = SR_INST_USB;
 		sdi->conn = sr_usb_dev_inst_new(libusb_get_bus_number(devlist[i]),
 			libusb_get_device_address(devlist[i]), NULL);
 
-		/* MVP intentionally exposes CH1 only. */
+		/* The current driver exposes CH1 only. */
 		sr_channel_new(sdi, 0, SR_CHANNEL_ANALOG, TRUE, "CH1");
 		devc = g_malloc0(sizeof(*devc));
 		sr_sw_limits_init(&devc->limits);
@@ -554,7 +554,7 @@ static int dev_acquisition_stop(struct sr_dev_inst *sdi)
 
 static struct sr_dev_driver hantek_1008c_driver_info = {
 	.name = "hantek-1008c",
-	.longname = "Hantek 1008C (experimental)",
+	.longname = "Hantek 1008C",
 	.api_version = 1,
 	.init = std_init,
 	.cleanup = std_cleanup,

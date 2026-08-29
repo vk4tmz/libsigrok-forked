@@ -1,7 +1,7 @@
 /*
  * This file is part of the libsigrok project.
  *
- * Experimental Hantek 1008C USB protocol support.
+ * Hantek 1008C USB protocol support.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
