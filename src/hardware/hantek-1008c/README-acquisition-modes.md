@@ -195,3 +195,26 @@ Examples: 5K -> 8K, 10K -> 12K, 20K -> 20K.
 
 This is in addition to never truncating packets at the session bus. ROLL mode keeps
 the exact requested sample limit because it is a true continuous stream.
+
+## Official Windows timebase / trigger evidence
+
+Targeted USBPcap captures of the official Hantek application on 2026-08-29 establish a distinction that the production driver must preserve:
+
+| UI time/div | A3 | Official regime | transfer family |
+|---:|---:|---|---|
+| 100 ms | `0x18` | Trigger | C6/A6 |
+| 200 ms | `0x19` | Trigger | C6/A6 |
+| 500 ms | `0x1A` | Scan Mode | C9/CA |
+| 1 s | `0x1B` | Scan Mode | C9/CA |
+
+The official application still uses `A4 01` in the observed C9/CA Scan Mode. Therefore the driver's existing low-rate `A4 02 + C7/C8` ROLL implementation is a different mechanism and must not be renamed or treated as official Scan Mode. C9/CA should be characterized independently before promotion into the production path.
+
+The same official captures establish these trigger controls:
+
+- `AB hi lo`: vertical trigger threshold, big-endian 16-bit ADC-domain value.
+- `AC [u16] [u24] [u24]`: horizontal acquisition-window / trigger-position data; the u24 pair partitions the total horizontal window.
+- `C1 00 xx`: Edge-trigger slope/polarity. A dedicated `+/-` toggle capture produces alternating `C1 00 01` / `C1 00 00`. Do not label numeric polarity orientation until transition ordering is unambiguous.
+- Trigger Sweep `Auto / Normal / Single`: no dedicated new configuration opcode was proven; observed behaviour is consistent with acquisition/re-arm policy. Do not invent a sweep selector byte.
+
+These are protocol findings only. They do not authorize waveform-specific cleanup, smoothing, interpolation, or changes to canonical direct-ADC reconstruction.
+
