@@ -1,8 +1,11 @@
-# Hantek 1008C BURST and ROLL acquisition modes
+# Hantek 1008C BURST, diagnostic ROLL, and official Scan acquisition
 
-## Two different acquisition models
+## Observed acquisition mechanisms
 
-The Hantek 1008C has two fundamentally different acquisition models.
+The Hantek 1008C currently has three observed acquisition/transfer mechanisms relevant
+to this driver. Two are implemented in the production driver; the official Windows
+Scan Mode transport is characterized in the Python protocol laboratory but is not yet
+promoted to production.
 
 **BURST mode** is a finite, triggered/swept acquisition. The scope is armed, a block of
 samples is captured into hardware memory, the completed frame is transferred to the
@@ -18,10 +21,18 @@ With one active channel the Hantek has a 4K-sample BURST memory. Repeated 4K fra
 therefore look "live" in a frontend, just as repeated CRT sweeps look continuous to the
 eye, but the frames are still separate acquisitions.
 
-**ROLL mode** is continuous low-rate acquisition. The device reports the number of
-available bytes with `C7` and the host drains them with `C8`. There is no 4K sweep
-boundary defining the trace. This behaves more like a strip-chart recorder: new
-samples continuously arrive and are appended to the timeline.
+**Diagnostic ROLL mode** is the existing continuous low-rate `A4 02 + C7/C8` path.
+The device reports the number of available bytes with `C7` and the host drains them
+with `C8`. There is no 4K sweep boundary defining the trace. This behaves more like a
+strip-chart recorder: new samples continuously arrive and are appended to the timeline.
+It is a useful validated low-rate transport, but it is not the official Hantek Windows
+application's Scan Mode.
+
+**Official Scan Mode** is used by the Windows application from 500 ms/div (`A3=1A`)
+and slower. It keeps `A4 01` and transfers a continuous byte stream using `C9/CA`.
+Linux protocol-lab captures have validated the stream framing and cadence for `A3=1A`,
+`1B`, and `1C`; exact semantics of the two words in each candidate row remain under
+investigation, so this transport is not yet exposed by the production driver.
 
 ## Sample-rate and waveform guidance
 
@@ -207,7 +218,51 @@ Targeted USBPcap captures of the official Hantek application on 2026-08-29 estab
 | 500 ms | `0x1A` | Scan Mode | C9/CA |
 | 1 s | `0x1B` | Scan Mode | C9/CA |
 
-The official application still uses `A4 01` in the observed C9/CA Scan Mode. Therefore the driver's existing low-rate `A4 02 + C7/C8` ROLL implementation is a different mechanism and must not be renamed or treated as official Scan Mode. C9/CA should be characterized independently before promotion into the production path.
+The official application still uses `A4 01` in the observed C9/CA Scan Mode. Therefore
+the driver's existing low-rate `A4 02 + C7/C8` ROLL implementation is a different
+mechanism and must not be renamed or treated as official Scan Mode.
+
+### Linux C9/CA Scan validation
+
+The Python protocol-laboratory path now independently reproduces the official
+`A4 01 + C9/CA` Scan transport on Linux. The following framing rules are supported by
+repeated hardware captures:
+
+- In steady state, `C9` values from 1 through 64 specify the valid prefix length of the
+  following fixed 64-byte `CA` response. Bytes after that prefix are zero padding.
+- Occasional startup `C9` values greater than 64 have different/unknown semantics.
+  They are quarantined and are not interpreted as a FIFO byte count or sample data.
+- USB `CA` transaction boundaries are transport boundaries only. A stateful framer
+  carries 0 through 3 bytes between responses and emits only complete neutral 4-byte
+  candidate rows. Capture-end carry is preserved verbatim; it is never padded or
+  discarded.
+- A candidate row consists of two little-endian 16-bit values, currently named
+  `word0` and `word1`. Their exact temporal/device semantics are deliberately not yet
+  assigned.
+
+Three-point cadence validation with the same CH1 configuration gives:
+
+| A3 | Official time/div | Candidate 4-byte rows/s | Capture-end carry |
+|---:|---:|---:|---:|
+| `0x1A` | 500 ms/div | 397.194 | 0 B |
+| `0x1B` | 1 s/div | 198.649 | 0 B |
+| `0x1C` | 2 s/div | 99.173 | 2 B |
+
+The approximately 400/200/100 row/s progression closely matches the independently
+measured `C7/C8` low-rate cadence at the same A3 values (about 401/201/100 per second).
+This strongly supports 4-byte logical row framing for the tested CH1-only Scan stream,
+while not proving what one row should mean as a libsigrok analogue sample.
+
+For an `A3=1C` capture of the onboard test signal, `word0` spanned 1998..2202 and
+`word1` 1999..2201 ADC-like counts. The mean absolute within-row difference was about
+1.096 counts and the maximum was 66 counts. This strongly indicates related analogue
+observations rather than unrelated metadata, but is not sufficient to choose one word,
+average them, or emit two samples per row in the production driver.
+
+Accordingly, the proven C9/CA transport/framing findings are documented here, but the
+production acquisition code intentionally remains unchanged until `word0`/`word1`
+semantics and the correct libsigrok sample representation are established in the
+waveform-agnostic Python reference path.
 
 The same official captures establish these trigger controls:
 
