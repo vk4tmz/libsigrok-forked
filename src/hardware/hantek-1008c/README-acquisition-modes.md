@@ -1,6 +1,5 @@
 # Hantek 1008C TRIGGERED, diagnostic ROLL, and official Scan acquisition
 
-
 ## Terminology
 
 The official Hantek Windows application calls the finite C6/A6 acquisition family **Triggered**. Earlier driver revisions called this family **BURST** while its protocol role was still being established. The driver now uses **Triggered** for that family; this is a terminology cleanup only and does not change the C6/A6 acquisition protocol. **Scan** remains the official C9/CA streaming family, while the separate diagnostic C7/C8 **ROLL** path remains distinct.
@@ -204,7 +203,6 @@ shortened final sweep. ROLL mode is continuous and may stop exactly at the reque
 sample count. For TRIGGERED acquisition, `limit_frames` is the natural control when an
 exact number of sweeps is required.
 
-
 ### PulseView sample-count normalization
 
 PulseView uses `SR_CONF_LIMIT_SAMPLES` not only as a stop condition but also as the
@@ -220,8 +218,6 @@ the exact requested sample limit because it is a true continuous stream.
 
 ## Official Windows timebase / trigger evidence
 
-Targeted USBPcap captures of the official Hantek application on 2026-08-29 establish a distinction that the production driver must preserve:
-
 | UI time/div | A3 | Official regime | transfer family |
 |---:|---:|---|---|
 | 100 ms | `0x18` | Trigger | C6/A6 |
@@ -232,7 +228,6 @@ Targeted USBPcap captures of the official Hantek application on 2026-08-29 estab
 The official application still uses `A4 01` in the observed C9/CA Scan Mode. Therefore
 the driver's existing low-rate `A4 02 + C7/C8` ROLL implementation is a different
 mechanism and must not be renamed or treated as official Scan Mode.
-
 
 ### Startup A3 synchronization
 
@@ -291,7 +286,7 @@ The same official captures establish these trigger controls:
 
 - `AB hi lo`: vertical trigger threshold, big-endian 16-bit ADC-domain value.
 - `AC [u16] [u24] [u24]`: horizontal acquisition-window / trigger-position data; the u24 pair partitions the total horizontal window.
-- `C1 00 xx`: Edge-trigger slope/polarity. Correlation against the recorded Windows UI chronology (`+ -> - -> + -> - ... -> +`) proves `C1 00 00` = `+` / rising and `C1 00 01` = `-` / falling.
+- `C1 <source> <slope>`: Edge-trigger source/slope. The 2026-08-29 CH1-only chronology proves second byte `00` = `+` / rising and `01` = `-` / falling; the 2026-08-30 multi-channel corpus proves zero-based first-byte source numbering through CH5 (`00`..`04`).
 - Trigger Sweep `Auto / Normal / Single`: no dedicated new configuration opcode was proven; observed behaviour is consistent with host acquisition/re-arm policy. Do not invent a sweep selector byte.
 
 Controlled Linux tests then establish the arm/wait state machine. The correct
@@ -322,7 +317,6 @@ These findings do not authorize waveform-specific cleanup, smoothing,
 interpolation, or changes to canonical direct-ADC reconstruction. Production
 code should be changed only by deliberately promoting the proven Python
 reference semantics.
-
 
 ### AC A/B result at A3=11
 
@@ -681,3 +675,101 @@ canonical interface and continues to take precedence when present.
 Hardware edge triggering is currently enabled only for the validated C6/A6
 triggered family.  Official C9/CA Scan and diagnostic C7/C8 ROLL transport remain
 unchanged.
+
+## Official Windows multi-channel evidence (2026-08-30)
+
+acquisition evidence.  At 10 ms/div the physical C6/A6 frame remains 8000 bytes
+/ 4000 little-endian 16-bit words while the observed acquisition width changes
+with the number of channels explicitly enabled in the Windows UI:
+
+| Explicit UI channels | Observed acquisition width | Approx. words/lane |
+|---:|---:|---:|
+| 1 | 1 | 4000 |
+| 2 | 2 | 2000 |
+| 3 | 4 | 1000 |
+| 4 | 4 | 1000 |
+| 5 | 6 | 667/666 |
+| 6 | 6 | 667/666 |
+| 7 | 8 | 500 |
+| 8 | 8 | 500 |
+
+CH1 carried an independent 1 kHz square wave and CH2 an independent 4 kHz sine,
+allowing the first two interleaved lanes to be identified without any
+waveform-specific processing.  A CH1+CH8 capture also confirms that non-adjacent
+enabled physical channels can participate in the interleaved acquisition.
+
+Do **not** yet describe the 3->4, 5->6, 7->8 width rounding as a bug, fixed pair
+architecture, or accidental partner-channel enable.  The Windows evidence only
+establishes the table above.  Before production multi-channel demultiplexing is
+implemented, the Python protocol laboratory should deliberately drive the
+nominally disabled extra channel in 3/5/7-channel configurations and determine
+whether the extra lane is an adjacent ADC channel or padding/internal state.
+
+Channel-configuration examples include:
+
+```text
+CH1 only: A0 01 ; AA 01 00 00 00 00 00 00 00
+CH1+CH2:  A0 02 ; AA 01 01 00 00 00 00 00 00
+CH1+CH8:  A0 02 ; AA 01 00 00 00 00 00 00 01
+```
+
+The final 5->6->7->8 transition capture demonstrates that A0 and AA are not
+always redundant.  AA can expand to eight active acquisition entries when CH7
+is enabled before the later explicit CH8 enable changes A0 to 08.  Production
+code must preserve the evidence and avoid collapsing A0/AA into one guessed
+semantic until the Python lab resolves their roles.
+
+### Multi-channel trigger source / threshold
+
+The official application directly establishes zero-based C1 source numbering
+through CH5:
+
+```text
+C1 00 00 = CH1 rising
+C1 01 00 = CH2 rising
+C1 02 00 = CH3 rising
+C1 03 00 = CH4 rising
+C1 04 00 = CH5 rising
+```
+
+The second byte remains slope (`00` rising, `01` falling).  On source change the
+application sends the newly selected source's channel-specific raw ADC trigger
+threshold before source/slope and arming:
+
+```text
+AB <source-specific raw threshold>
+C1 <zero-based source> <slope>
+F3
+A4 01
+C0
+```
+
+A CH2->CH1 capture with CH1 stored at -105 mV and CH2 at 0 V sent `AB 07 C9`
+before `C1 00 00`, ruling out stale carry-over of CH2's threshold.  Channels at
+the same 0 V UI trigger level can have different AB codes, so trigger voltage
+must be resolved for the selected channel rather than treated as one universal
+ADC threshold.
+
+### USB capture device-address warning
+
+During some official-Windows trigger-source runs the Hantek disappeared and
+returned under a new USB device address (observed Dev32 -> Dev33 -> Dev34).
+Captures filtered to only the original Dev address therefore lost all later
+Hantek traffic and initially made CH4/CH5 C1 writes appear absent.  A broader
+capture recovered ordinary `C1 03 00` and `C1 04 00` writes.
+
+acquisition pauses on some trigger-source changes, so the pause itself is not a
+Wireshark artefact.  The exact relationship between the pause and USB
+re-enumeration remains unresolved.  Re-enumeration is an evidence-capture hazard,
+not a protocol requirement; do not reproduce it in the driver.
+
+Compressed supporting captures and SHA-256 hashes are retained under
+
+### Corrected extreme fast-end A3 mapping
+
+A focused official-Windows 5 ns -> 2 ns -> 1 ns -> 2 ns -> 5 ns capture on
+2026-08-30 produced `A3 01`, `A3 00`, `A3 01`, `A3 02`.  Therefore the official
+mapping is directly established as 1 ns/div = A3 00, 2 ns/div = A3 01, and
+5 ns/div = A3 02.  The earlier duplicate 1 ns/2 ns A3=01 interpretation was a
+capture/interpretation miss.  This mapping alone does not authorize a production
+samplerate; effective timing must still be measured under Linux.
