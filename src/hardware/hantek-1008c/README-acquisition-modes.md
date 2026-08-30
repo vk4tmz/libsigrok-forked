@@ -635,12 +635,13 @@ sending `C2` immediately after every `C0` arm.  The implementation keeps the
 A5 polling non-blocking so a frontend Stop remains responsive while a Normal
 trigger is waiting.
 
-- Trigger enablement is derived from libsigrok's **session trigger** (`struct sr_trigger`), not from merely setting the device `triggersource`/`triggerslope` configuration values. Those configuration values select source/slope defaults but do not themselves mean that a trigger is active.
-- The driver advertises `SR_CONF_TRIGGER_MATCH` with `SR_TRIGGER_RISING` and `SR_TRIGGER_FALLING` so sigrok frontends can construct a CH1 edge session trigger.
-- No session trigger: Auto/free-running policy.  Arm with `C0`, poll A5, accept
+- The canonical trigger path is libsigrok's **session trigger** (`struct sr_trigger`).  A valid session trigger always takes precedence.
+- The driver advertises `SR_CONF_TRIGGER_MATCH` with `SR_TRIGGER_RISING` and `SR_TRIGGER_FALLING` so frontends that support analog session-trigger construction can create a CH1 edge trigger.
+- PulseView 0.5.x exposes the device-level `SR_CONF_TRIGGER_SOURCE` and `SR_CONF_TRIGGER_SLOPE` controls for this analog device but does not currently provide the generic trigger-match toolbar on an analog signal.  As a deliberately narrow frontend fallback, the source list is therefore `None`, `CH1`: `None` means Auto/free-running when no session trigger exists, while explicit `CH1` means Normal hardware triggering using the selected `r`/`f` slope.  This does not invent a trigger-match value and does not alter the canonical session-trigger path.
+- No session trigger and source `None`: Auto/free-running policy.  Arm with `C0`, poll A5, accept
   a genuine hardware completion when it arrives, otherwise send `C2` after the
   official approximately 1.87 s Auto timeout and then read the forced frame.
-- One CH1 rising/falling session trigger: Normal policy.  Arm with `C0` and
+- A CH1 rising/falling session trigger, or the PulseView fallback source `CH1`: Normal policy.  Arm with `C0` and
   poll A5 indefinitely; no timeout `C2` is sent.  After a genuine triggered
   frame is read, the next acquisition callback re-arms automatically while
   the session remains running.
@@ -651,6 +652,26 @@ trigger is waiting.
 - Single/one-shot is a documented official-application policy but is not
   mapped onto ordinary PulseView Run and is not exposed as a device-specific
   sweep control.
+
+### PulseView hardware validation (2026-08-30)
+
+The `None` / `CH1` device-level fallback was validated end-to-end with the
+locally built PulseView 0.5.x frontend and real Hantek 1008C hardware:
+
+- With CH1 grounded and source `None`, PulseView continued to acquire the
+  expected approximately 1.66 ms burst frames at 2.4 MS/s, confirming the
+  Auto/free-running path remained active.
+- With CH1 grounded and source `CH1`, acquisition remained armed until the
+  operator stopped it, confirming Normal mode does not fall through to the
+  Auto timeout.
+- With a 1 kHz square wave connected to CH1, source `CH1` and slope `r`
+  triggered correctly on the rising edge.
+- With the same input and slope `f`, triggering correctly moved to the falling
+  edge.
+
+This validates the PulseView device-setting fallback without any PulseView
+source changes.  The standard libsigrok session-trigger path remains the
+canonical interface and continues to take precedence when present.
 
 Hardware edge triggering is currently enabled only for the validated C6/A6
 burst family.  Official C9/CA Scan and diagnostic C7/C8 ROLL transport remain

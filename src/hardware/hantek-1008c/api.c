@@ -81,7 +81,7 @@ static const uint64_t samplerates[] = {
 	UINT64_C(2006), UINT64_C(800000), UINT64_C(2400000),
 };
 
-static const char *trigger_sources[] = { "CH1" };
+static const char *trigger_sources[] = { "None", "CH1" };
 static const char *trigger_slopes[] = { "r", "f" };
 static const int32_t trigger_matches[] = {
 	SR_TRIGGER_RISING,
@@ -201,6 +201,7 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 		devc->a3 = H1008C_A3_24MSPS;
 		devc->acquisition_mode = H1008C_MODE_BURST;
 		devc->trigger_enabled = FALSE;
+		devc->trigger_source_enabled = FALSE;
 		devc->trigger_slope = H1008C_TRIGGER_RISING;
 		devc->trigger_level_adc = 0x0800;
 		sdi->priv = devc;
@@ -233,7 +234,8 @@ static int config_get(uint32_t key, GVariant **data,
 		*data = g_variant_new_uint64(devc->samplerate);
 		return SR_OK;
 	case SR_CONF_TRIGGER_SOURCE:
-		*data = g_variant_new_string("CH1");
+		*data = g_variant_new_string(
+			devc->trigger_source_enabled ? "CH1" : "None");
 		return SR_OK;
 	case SR_CONF_TRIGGER_SLOPE:
 		*data = g_variant_new_string(
@@ -259,7 +261,13 @@ static int config_set(uint32_t key, GVariant *data,
 	if (key == SR_CONF_LIMIT_FRAMES)
 		return sr_sw_limits_config_set(&devc->limits, key, data);
 	if (key == SR_CONF_TRIGGER_SOURCE) {
-		if (g_strcmp0(g_variant_get_string(data, NULL), "CH1"))
+		const char *source = g_variant_get_string(data, NULL);
+
+		if (!strcmp(source, "None"))
+			devc->trigger_source_enabled = FALSE;
+		else if (!strcmp(source, "CH1"))
+			devc->trigger_source_enabled = TRUE;
+		else
 			return SR_ERR_ARG;
 		return SR_OK;
 	}
@@ -543,8 +551,24 @@ static int configure_session_trigger(const struct sr_dev_inst *sdi)
 
 	devc->trigger_enabled = FALSE;
 	trigger = sr_session_trigger_get(sdi->session);
-	if (!trigger || !trigger->stages)
+	if (!trigger || !trigger->stages) {
+		/*
+		 * PulseView currently exposes SR_CONF_TRIGGER_SOURCE/SLOPE for
+		 * analog devices but does not construct a generic analog session
+		 * trigger from the signal popup.  Treat an explicitly selected
+		 * CH1 source as a frontend fallback; the canonical session trigger
+		 * path below still takes precedence whenever one is present.
+		 */
+		if (!devc->trigger_source_enabled)
+			return SR_OK;
+		if (devc->acquisition_mode != H1008C_MODE_BURST) {
+			sr_err("Hantek 1008C hardware edge triggering is currently "
+				"supported in burst mode only.");
+			return SR_ERR_NA;
+		}
+		devc->trigger_enabled = TRUE;
 		return SR_OK;
+	}
 	if (trigger->stages->next) {
 		sr_err("Hantek 1008C supports one trigger stage only.");
 		return SR_ERR_ARG;

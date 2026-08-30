@@ -65,6 +65,7 @@ struct dev_context {
 	uint8_t a3;
 	enum h1008c_acquisition_mode acquisition_mode;
 	gboolean trigger_enabled;
+	gboolean trigger_source_enabled;
 	enum h1008c_trigger_slope trigger_slope;
 	uint16_t trigger_level_adc;
 	gboolean burst_armed;
