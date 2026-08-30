@@ -41,7 +41,7 @@ struct h1008c_rate {
 };
 
 /*
- * PulseView-facing CH1 rates. Burst rates are hardware-validated. Diagnostic
+ * PulseView-facing CH1 rates. Triggered rates are hardware-validated. Diagnostic
  * C7/C8 ROLL rates retain their established word0-only mapping except that
  * official Scan takes precedence at the shared public 2 samples/s setting.
  * Official C9/CA Scan is exposed for the validated A3=1A..22 region, using
@@ -71,8 +71,8 @@ static const struct h1008c_rate rate_table[] = {
 	{ UINT64_C(800),     0x1a, H1008C_MODE_SCAN },
 	{ UINT64_C(1003),    0x19, H1008C_MODE_ROLL },
 	{ UINT64_C(2006),    0x18, H1008C_MODE_ROLL },
-	{ UINT64_C(800000),  0x11, H1008C_MODE_BURST },
-	{ UINT64_C(2400000), 0x0f, H1008C_MODE_BURST },
+	{ UINT64_C(800000),  0x11, H1008C_MODE_TRIGGERED },
+	{ UINT64_C(2400000), 0x0f, H1008C_MODE_TRIGGERED },
 };
 
 static const uint64_t samplerates[] = {
@@ -100,25 +100,25 @@ static const struct h1008c_rate *find_rate(uint64_t samplerate)
 }
 
 
-#define H1008C_BURST_FRAME_SAMPLES UINT64_C(4000)
+#define H1008C_TRIGGERED_FRAME_SAMPLES UINT64_C(4000)
 
 static uint64_t effective_sample_limit(const struct dev_context *devc,
 		uint64_t requested)
 {
 	uint64_t frames;
 
-	if (!requested || devc->acquisition_mode != H1008C_MODE_BURST)
+	if (!requested || devc->acquisition_mode != H1008C_MODE_TRIGGERED)
 		return requested;
 
 	/*
-	 * BURST mode has an indivisible 4K hardware frame. Round the configured
+	 * TRIGGERED mode has an indivisible 4K hardware frame. Round the configured
 	 * limit up here, at the configuration boundary, so frontends such as
 	 * PulseView also learn the true capture size instead of allocating for
 	 * (for example) 5000 samples and clipping the second 4K frame.
 	 */
-	frames = (requested + H1008C_BURST_FRAME_SAMPLES - 1) /
-		H1008C_BURST_FRAME_SAMPLES;
-	return frames * H1008C_BURST_FRAME_SAMPLES;
+	frames = (requested + H1008C_TRIGGERED_FRAME_SAMPLES - 1) /
+		H1008C_TRIGGERED_FRAME_SAMPLES;
+	return frames * H1008C_TRIGGERED_FRAME_SAMPLES;
 }
 
 static int apply_sample_limit(struct dev_context *devc)
@@ -131,7 +131,7 @@ static int apply_sample_limit(struct dev_context *devc)
 	value = g_variant_new_uint64(effective);
 	ret = sr_sw_limits_config_set(&devc->limits, SR_CONF_LIMIT_SAMPLES, value);
 	if (ret == SR_OK && effective != devc->requested_limit_samples)
-		sr_info("Burst sample limit rounded from %" PRIu64
+		sr_info("Triggered sample limit rounded from %" PRIu64
 			" to %" PRIu64 " to preserve complete 4K frames.",
 			devc->requested_limit_samples, effective);
 	return ret;
@@ -199,7 +199,7 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 		sr_sw_limits_init(&devc->limits);
 		devc->samplerate = H1008C_SAMPLERATE;
 		devc->a3 = H1008C_A3_24MSPS;
-		devc->acquisition_mode = H1008C_MODE_BURST;
+		devc->acquisition_mode = H1008C_MODE_TRIGGERED;
 		devc->trigger_enabled = FALSE;
 		devc->trigger_source_enabled = FALSE;
 		devc->trigger_slope = H1008C_TRIGGER_RISING;
@@ -292,7 +292,7 @@ static int config_set(uint32_t key, GVariant *data,
 	devc->acquisition_mode = rate->mode;
 	/*
 	 * PulseView may set sample count and samplerate in either order. Re-apply
-	 * the user's requested sample limit after mode selection so BURST always
+	 * the user's requested sample limit after mode selection so TRIGGERED always
 	 * advertises an integral number of 4K frames while continuous ROLL/Scan
 	 * modes remain exact.
 	 */
@@ -300,7 +300,7 @@ static int config_set(uint32_t key, GVariant *data,
 		return SR_ERR;
 	sr_info("Selected %" PRIu64 " samples/s: %s mode, A3=%02x.",
 		devc->samplerate,
-		devc->acquisition_mode == H1008C_MODE_BURST ? "burst" :
+		devc->acquisition_mode == H1008C_MODE_TRIGGERED ? "triggered" :
 		devc->acquisition_mode == H1008C_MODE_SCAN ? "scan" : "roll",
 		devc->a3);
 	return SR_OK;
@@ -478,28 +478,28 @@ static int receive_samples(int fd, int revents, void *cb_data)
 	if (!devc->running)
 		return TRUE;
 
-	frame = devc->acquisition_mode == H1008C_MODE_BURST;
+	frame = devc->acquisition_mode == H1008C_MODE_TRIGGERED;
 	if (frame)
-		ret = h1008c_acquire_frame(sdi, &samples, &count);
+		ret = h1008c_acquire_triggered_frame(sdi, &samples, &count);
 	else if (devc->acquisition_mode == H1008C_MODE_SCAN)
 		ret = h1008c_read_scan(sdi, &samples, &count);
 	else
 		ret = h1008c_read_roll(sdi, &samples, &count);
 	if (ret != SR_OK) {
 		sr_err("Hantek 1008C %s acquisition failed; stopping.",
-			frame ? "burst" :
+			frame ? "triggered" :
 			devc->acquisition_mode == H1008C_MODE_SCAN ? "scan" : "roll");
 		sr_dev_acquisition_stop(sdi);
 		return TRUE;
 	}
 
-	/* Empty polls mean no samples are ready yet, including an armed burst. */
+	/* Empty polls mean no samples are ready yet, including an armed triggered. */
 	if (!count)
 		return TRUE;
 
 	remain = count;
 	/*
-	 * A burst is one physical acquisition frame. Never truncate a completed
+	 * A triggered is one physical acquisition frame. Never truncate a completed
 	 * hardware frame merely to satisfy an aggregate sample limit: doing so
 	 * makes the final sweep appear shortened in frontends such as PulseView.
 	 * Let the software limit stop acquisition after the complete frame, even
@@ -525,11 +525,11 @@ static int receive_samples(int fd, int revents, void *cb_data)
 
 	sr_sw_limits_update_samples_read(&devc->limits, remain);
 	if (frame) {
-		devc->burst_count++;
+		devc->triggered_count++;
 		sr_sw_limits_update_frames_read(&devc->limits, 1);
-		sr_dbg("burst=%" PRIu64 " frame=%" PRIu64 " samples=%" PRIu64
+		sr_dbg("triggered=%" PRIu64 " frame=%" PRIu64 " samples=%" PRIu64
 			" total=%" PRIu64 " direct-adc",
-			devc->burst_count, devc->limits.frames_read, remain,
+			devc->triggered_count, devc->limits.frames_read, remain,
 			devc->limits.samples_read);
 	} else {
 		sr_dbg("%s samples=%" PRIu64 " total=%" PRIu64,
@@ -561,9 +561,9 @@ static int configure_session_trigger(const struct sr_dev_inst *sdi)
 		 */
 		if (!devc->trigger_source_enabled)
 			return SR_OK;
-		if (devc->acquisition_mode != H1008C_MODE_BURST) {
+		if (devc->acquisition_mode != H1008C_MODE_TRIGGERED) {
 			sr_err("Hantek 1008C hardware edge triggering is currently "
-				"supported in burst mode only.");
+				"supported in triggered mode only.");
 			return SR_ERR_NA;
 		}
 		devc->trigger_enabled = TRUE;
@@ -592,9 +592,9 @@ static int configure_session_trigger(const struct sr_dev_inst *sdi)
 		sr_err("Hantek 1008C supports rising/falling hardware edge triggers only.");
 		return SR_ERR_ARG;
 	}
-	if (devc->acquisition_mode != H1008C_MODE_BURST) {
+	if (devc->acquisition_mode != H1008C_MODE_TRIGGERED) {
 		sr_err("Hantek 1008C hardware edge triggering is currently "
-			"supported in burst mode only.");
+			"supported in triggered mode only.");
 		return SR_ERR_NA;
 	}
 	devc->trigger_enabled = TRUE;
@@ -624,17 +624,17 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 	 * Keep the full startup/final configuration on the selected A3 for both
 	 * acquisition families.  The Python reference ROLL path is validated this
 	 * way, and the official application likewise applies the selected A3 as
-	 * part of final initialization rather than substituting a burst-only rate.
+	 * part of final initialization rather than substituting a triggered-only rate.
 	 * h1008c_start_roll() deliberately sends the same A3 again immediately
 	 * before A4 02, matching the validated C7/C8 laboratory sequence.
 	 */
 	if (h1008c_startup(sdi, devc->a3) != SR_OK)
 		return SR_ERR;
 	devc->running = TRUE;
-	devc->burst_count = 0;
-	devc->burst_armed = FALSE;
-	devc->burst_forced = FALSE;
-	devc->burst_arm_us = 0;
+	devc->triggered_count = 0;
+	devc->triggered_armed = FALSE;
+	devc->triggered_forced = FALSE;
+	devc->triggered_arm_us = 0;
 	sr_sw_limits_acquisition_start(&devc->limits);
 	std_session_send_df_header(sdi);
 	devc->scan_carry_len = 0;
@@ -652,7 +652,7 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 	sr_info("Acquisition start: %" PRIu64
 		" samples/s, %s mode, A3=%02x, trigger=%s%s.",
 		devc->samplerate,
-		devc->acquisition_mode == H1008C_MODE_BURST ? "burst" :
+		devc->acquisition_mode == H1008C_MODE_TRIGGERED ? "triggered" :
 		devc->acquisition_mode == H1008C_MODE_SCAN ? "scan" : "roll",
 		devc->a3,
 		devc->trigger_enabled ? "normal/edge" : "auto/free-running",
@@ -660,7 +660,7 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 			(devc->trigger_slope == H1008C_TRIGGER_RISING ?
 			"/rising" : "/falling") : "");
 	return sr_session_source_add(sdi->session, -1, 0,
-		devc->acquisition_mode == H1008C_MODE_BURST ? 1 : 5,
+		devc->acquisition_mode == H1008C_MODE_TRIGGERED ? 1 : 5,
 		receive_samples, (struct sr_dev_inst *)sdi);
 }
 
@@ -671,12 +671,12 @@ static int dev_acquisition_stop(struct sr_dev_inst *sdi)
 
 	if (!devc->running)
 		return SR_OK;
-	sr_dbg("Acquisition stop requested: mode=%d burst_armed=%s.",
-		devc->acquisition_mode, devc->burst_armed ? "yes" : "no");
-	if (devc->acquisition_mode == H1008C_MODE_BURST && devc->burst_armed) {
+	sr_dbg("Acquisition stop requested: mode=%d triggered_armed=%s.",
+		devc->acquisition_mode, devc->triggered_armed ? "yes" : "no");
+	if (devc->acquisition_mode == H1008C_MODE_TRIGGERED && devc->triggered_armed) {
 		ret = h1008c_abort_frame(sdi);
 		if (ret != SR_OK)
-			sr_warn("Failed to abort armed burst during acquisition stop.");
+			sr_warn("Failed to abort armed triggered during acquisition stop.");
 	}
 	devc->running = FALSE;
 	sr_session_source_remove(sdi->session, -1);

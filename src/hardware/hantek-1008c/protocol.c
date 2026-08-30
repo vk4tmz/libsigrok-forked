@@ -355,7 +355,7 @@ SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi, uint8_t selected_a3)
 	return SR_OK;
 }
 
-static int arm_direct_capture(const struct sr_dev_inst *sdi)
+static int arm_triggered_capture(const struct sr_dev_inst *sdi)
 {
 	struct dev_context *devc = sdi->priv;
 	static const uint8_t f3[] = { 0xf3 };
@@ -376,21 +376,21 @@ static int arm_direct_capture(const struct sr_dev_inst *sdi)
 	    command(sdi, e6, sizeof(e6)) != SR_OK ||
 	    command(sdi, a4, sizeof(a4)) != SR_OK)
 		return SR_ERR;
-	if (H1008C_BURST_ARM_DELAY_US)
-		g_usleep(H1008C_BURST_ARM_DELAY_US);
+	if (H1008C_TRIGGERED_ARM_DELAY_US)
+		g_usleep(H1008C_TRIGGERED_ARM_DELAY_US);
 	if (command(sdi, c0, sizeof(c0)) != SR_OK)
 		return SR_ERR;
-	devc->burst_armed = TRUE;
-	devc->burst_forced = FALSE;
-	devc->burst_arm_us = g_get_monotonic_time();
-	sr_dbg("Burst armed: policy=%s slope=%s AB=%04x.",
+	devc->triggered_armed = TRUE;
+	devc->triggered_forced = FALSE;
+	devc->triggered_arm_us = g_get_monotonic_time();
+	sr_dbg("Triggered acquisition armed: policy=%s slope=%s AB=%04x.",
 		devc->trigger_enabled ? "normal" : "auto",
 		devc->trigger_slope == H1008C_TRIGGER_RISING ? "rising" : "falling",
 		devc->trigger_level_adc);
 	return SR_OK;
 }
 
-static int finish_direct_capture(const struct sr_dev_inst *sdi)
+static int finish_triggered_capture(const struct sr_dev_inst *sdi)
 {
 	static const uint8_t e4[] = { 0xe4, 0x01 };
 	static const uint8_t e6[] = { 0xe6, 0x01 };
@@ -406,22 +406,22 @@ SR_PRIV int h1008c_abort_frame(const struct sr_dev_inst *sdi)
 	struct dev_context *devc = sdi->priv;
 	static const uint8_t c2[] = { 0xc2 };
 
-	if (!devc->burst_armed)
+	if (!devc->triggered_armed)
 		return SR_OK;
-	if (!devc->burst_forced) {
-		sr_dbg("Aborting armed burst with C2.");
+	if (!devc->triggered_forced) {
+		sr_dbg("Aborting armed Triggered acquisition with C2.");
 		if (command(sdi, c2, sizeof(c2)) != SR_OK)
 			return SR_ERR;
 	} else {
-		sr_dbg("Clearing already-forced burst state during stop.");
+		sr_dbg("Clearing already-forced Triggered acquisition state during stop.");
 	}
-	devc->burst_armed = FALSE;
-	devc->burst_forced = FALSE;
-	devc->burst_arm_us = 0;
+	devc->triggered_armed = FALSE;
+	devc->triggered_forced = FALSE;
+	devc->triggered_arm_us = 0;
 	return SR_OK;
 }
 
-SR_PRIV int h1008c_acquire_frame(const struct sr_dev_inst *sdi,
+SR_PRIV int h1008c_acquire_triggered_frame(const struct sr_dev_inst *sdi,
 		float **samples, size_t *sample_count)
 {
 	struct dev_context *devc = sdi->priv;
@@ -436,35 +436,35 @@ SR_PRIV int h1008c_acquire_frame(const struct sr_dev_inst *sdi,
 
 	*samples = NULL;
 	*sample_count = 0;
-	if (!devc->burst_armed && arm_direct_capture(sdi) != SR_OK)
+	if (!devc->triggered_armed && arm_triggered_capture(sdi) != SR_OK)
 		return SR_ERR;
 
 	if (poll_ready(sdi, &ready, &state) != SR_OK)
 		return SR_ERR;
 	if (!ready) {
-		elapsed = g_get_monotonic_time() - devc->burst_arm_us;
-		if (!devc->trigger_enabled && !devc->burst_forced &&
+		elapsed = g_get_monotonic_time() - devc->triggered_arm_us;
+		if (!devc->trigger_enabled && !devc->triggered_forced &&
 		    elapsed >= H1008C_AUTO_TRIGGER_TIMEOUT_US) {
 			if (command(sdi, c2, sizeof(c2)) != SR_OK)
 				return SR_ERR;
-			devc->burst_forced = TRUE;
+			devc->triggered_forced = TRUE;
 			sr_dbg("Auto trigger timeout after %.1f ms; C2 forced completion.",
 				(double)elapsed / 1000.0);
 		}
 		return SR_OK;
 	}
 
-	sr_dbg("Burst ready state=%u after %.1f ms (%s).", state,
-		(double)(g_get_monotonic_time() - devc->burst_arm_us) / 1000.0,
-		devc->burst_forced ? "forced" : "hardware");
+	sr_dbg("Triggered acquisition ready state=%u after %.1f ms (%s).", state,
+		(double)(g_get_monotonic_time() - devc->triggered_arm_us) / 1000.0,
+		devc->triggered_forced ? "forced" : "hardware");
 	ret = read_current_buffers(sdi, &raw, &total);
-	if (finish_direct_capture(sdi) != SR_OK) {
+	if (finish_triggered_capture(sdi) != SR_OK) {
 		g_free(raw);
 		return SR_ERR;
 	}
-	devc->burst_armed = FALSE;
-	devc->burst_forced = FALSE;
-	devc->burst_arm_us = 0;
+	devc->triggered_armed = FALSE;
+	devc->triggered_forced = FALSE;
+	devc->triggered_arm_us = 0;
 	if (ret != SR_OK)
 		return ret;
 

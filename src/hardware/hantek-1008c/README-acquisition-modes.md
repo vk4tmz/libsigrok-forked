@@ -1,23 +1,28 @@
-# Hantek 1008C BURST, diagnostic ROLL, and official Scan acquisition
+# Hantek 1008C TRIGGERED, diagnostic ROLL, and official Scan acquisition
+
+
+## Terminology
+
+The official Hantek Windows application calls the finite C6/A6 acquisition family **Triggered**. Earlier driver revisions called this family **BURST** while its protocol role was still being established. The driver now uses **Triggered** for that family; this is a terminology cleanup only and does not change the C6/A6 acquisition protocol. **Scan** remains the official C9/CA streaming family, while the separate diagnostic C7/C8 **ROLL** path remains distinct.
 
 ## Observed acquisition mechanisms
 
 The Hantek 1008C currently has three observed acquisition/transfer mechanisms relevant
-to this driver. Two are implemented in the production driver; the official Windows
-Scan Mode transport is characterized in the Python protocol laboratory but is not yet
-promoted to production.
+to this driver. The finite C6/A6 Triggered family and the official C9/CA Scan family are implemented
+in the production driver. The separate C7/C8 ROLL path remains diagnostic/legacy
+where it overlaps the official Scan range.
 
-**BURST mode** is a finite, triggered/swept acquisition. The scope is armed, a block of
+**TRIGGERED mode** is a finite, triggered/swept acquisition. The scope is armed, a block of
 samples is captured into hardware memory, the completed frame is transferred to the
 host, and the scope is then re-armed for another acquisition.
 
 This is the digital equivalent of a traditional triggered CRT oscilloscope. A classic
 CRT scope waits for a trigger, sweeps the beam from left to right, then retraces/resets
 before the next sweep. The retrace interval is not part of the displayed waveform.
-Likewise, the Hantek's time between BURST frames is dead time: it was not sampled and
+Likewise, the Hantek's time between TRIGGERED frames is dead time: it was not sampled and
 must never be filled with invented samples.
 
-With one active channel the Hantek has a 4K-sample BURST memory. Repeated 4K frames can
+With one active channel the Hantek has a 4K-sample TRIGGERED memory. Repeated 4K frames can
 therefore look "live" in a frontend, just as repeated CRT sweeps look continuous to the
 eye, but the frames are still separate acquisitions.
 
@@ -48,7 +53,7 @@ detecting that a signal exists.
 
 These are engineering guidance values, not manufacturer guarantees.
 
-## Relevant BURST A3 / timebase / rate mapping
+## Relevant TRIGGERED A3 / timebase / rate mapping
 
 A3 is the horizontal acquisition selector. Its nominal time/div value and the actual
 ADC sample rate are related but are not identical concepts; adjacent A3 values can
@@ -91,7 +96,7 @@ hardware with a 50 Hz sine. The observed progression was approximately 40, 20, 8
 
 ## Comfortable waveform-frequency table
 
-### BURST
+### TRIGGERED
 
 | Rate | 4K sampled span | Comfortable sine | Comfortable square |
 |---:|---:|---:|---:|
@@ -118,7 +123,7 @@ hardware with a 50 Hz sine. The observed progression was approximately 40, 20, 8
 
 ## Interpretation rules
 
-1. Never join BURST frames by inventing samples for acquisition dead time.
+1. Never join TRIGGERED frames by inventing samples for acquisition dead time.
 2. Never alter samples based on knowing the expected waveform shape.
 3. Test sine and square waves are validation signals, not reconstruction hints.
 4. Nyquist is not the same as a comfortable oscilloscope display limit.
@@ -135,8 +140,8 @@ The driver automatically selects acquisition mode from the requested samplerate.
 |---:|---|
 | 2, 4, 8, 20, 40, 80, 200, 400, 800 Sa/s | official Scan |
 | 1003, 2006 Sa/s | Trigger-region C7/C8 |
-| 800 kSa/s | BURST |
-| 2.4 MSa/s | BURST |
+| 800 kSa/s | TRIGGERED |
+| 2.4 MSa/s | TRIGGERED |
 
 The current exposed one-channel samplerate list is:
 
@@ -147,17 +152,17 @@ are intentionally not advertised to PulseView. Their internal mappings remain
 available as preserved protocol history, but the public list presents the
 official Scan cadence for every validated timebase from 500 ms/div onward.
 
-### BURST representation in sigrok
+### TRIGGERED representation in sigrok
 
-Each physical BURST acquisition is represented as a real sigrok frame:
+Each physical TRIGGERED acquisition is represented as a real sigrok frame:
 
 `FRAME_BEGIN -> ANALOG samples -> FRAME_END`
 
 Successive 4K frames are separate sweeps. They are intentionally not made contiguous
 with synthetic gap samples. PulseView can refresh successive frames quickly enough to
-look like a moving/live oscilloscope, but 800 kSa/s and 2.4 MSa/s remain BURST mode.
+look like a moving/live oscilloscope, but 800 kSa/s and 2.4 MSa/s remain TRIGGERED mode.
 
-Canonical BURST selectors are:
+Canonical TRIGGERED selectors are:
 
 | Rate | A3 |
 |---:|---:|
@@ -173,20 +178,20 @@ into the initialization path, the full 4K / 5 ms frame is clean.
 
 ROLL uses the continuous `C7`/`C8` transport. C7 reports the number of bytes currently
 ready and repeated C8 transactions drain those bytes. ROLL samples are sent as a
-continuous analog stream and are not wrapped in BURST frame markers.
+continuous analog stream and are not wrapped in TRIGGERED frame markers.
 
 The 2.006 kSa/s, 1.003 kSa/s, 401 Sa/s and 201 Sa/s rates were validated using a 50 Hz
 sine signal and produced the expected samples-per-cycle progression.
 
-## Sample limits in BURST mode
+## Sample limits in TRIGGERED mode
 
-`SR_CONF_LIMIT_SAMPLES` is an aggregate session limit, but a Hantek BURST is a
+`SR_CONF_LIMIT_SAMPLES` is an aggregate session limit, but a Hantek TRIGGERED is a
 physical 4K acquisition frame. The driver therefore never truncates the final
-physical BURST frame to hit a non-multiple-of-4000 sample limit exactly.
+physical TRIGGERED frame to hit a non-multiple-of-4000 sample limit exactly.
 
 Examples:
 
-| Requested sample limit | BURST frames delivered | Samples delivered |
+| Requested sample limit | TRIGGERED frames delivered | Samples delivered |
 |---:|---:|---:|
 | 1,000 | 1 | 4,000 |
 | 4,000 | 1 | 4,000 |
@@ -196,14 +201,14 @@ Examples:
 
 This preserves physical sweep integrity and prevents a frontend from displaying a
 shortened final sweep. ROLL mode is continuous and may stop exactly at the requested
-sample count. For BURST acquisition, `limit_frames` is the natural control when an
+sample count. For TRIGGERED acquisition, `limit_frames` is the natural control when an
 exact number of sweeps is required.
 
 
 ### PulseView sample-count normalization
 
 PulseView uses `SR_CONF_LIMIT_SAMPLES` not only as a stop condition but also as the
-capture size it expects to retain/display. In BURST mode the driver therefore rounds
+capture size it expects to retain/display. In TRIGGERED mode the driver therefore rounds
 a non-zero requested sample limit **up to the next complete 4000-sample frame at
 configuration time**, and reports that effective value back through
 `SR_CONF_LIMIT_SAMPLES`.
@@ -238,7 +243,7 @@ that validated flow.  It no longer substitutes `A3=0F` during full startup when
 a low-rate ROLL samplerate was selected.
 
 This is an existing-flow synchronization fix; it does not enable official
-`C9/CA` Scan Mode and it does not change BURST sequencing.
+`C9/CA` Scan Mode and it does not change TRIGGERED sequencing.
 
 ### Linux C9/CA Scan validation
 
@@ -321,13 +326,13 @@ reference semantics.
 
 ### AC A/B result at A3=11
 
-A controlled Python BURST A/B test compared the driver's historical final AC
+A controlled Python TRIGGERED A/B test compared the driver's historical final AC
 value `0,1,1401` with the official Windows A3=11 value `0,1,5001`, while
 holding CH1/A2/A3/A4 and the acquisition sequence constant.  Both settings
 reached ready state and returned the same physical acquisition geometry:
 buffer 02 empty, buffer 03 8000 bytes, 125 complete A6 packets and no trailing
 bytes.  This confirms that the official value is accepted but does not prove
-that samplerate-driven BURST should reproduce the official UI's AC mapping.
+that samplerate-driven TRIGGERED should reproduce the official UI's AC mapping.
 The production AC value therefore remains unchanged pending evidence of a
 functional requirement.
 
@@ -585,7 +590,7 @@ characterization of the official C9/CA Scan family through A3=28.
 Production Scan remains limited to A3=1A..22 while the correct libsigrok
 representation of rates below 1 Hz is resolved. Do not round or otherwise fake
 these profiles as integer `SR_CONF_SAMPLERATE` values; investigate timebase
-and/or sample-interval semantics instead. Existing C7/C8 ROLL and C6/A6 BURST
+and/or sample-interval semantics instead. Existing C7/C8 ROLL and C6/A6 TRIGGERED
 behaviour remain unchanged.
 
 ### Future PulseView enhancement: ultra-slow data logging / charting
@@ -630,7 +635,7 @@ a broader timing design requires otherwise.
 
 ## Production trigger policy
 
-The burst transport now uses the hardware trigger state machine instead of
+The triggered transport now uses the hardware trigger state machine instead of
 sending `C2` immediately after every `C0` arm.  The implementation keeps the
 A5 polling non-blocking so a frontend Stop remains responsive while a Normal
 trigger is waiting.
@@ -659,7 +664,7 @@ The `None` / `CH1` device-level fallback was validated end-to-end with the
 locally built PulseView 0.5.x frontend and real Hantek 1008C hardware:
 
 - With CH1 grounded and source `None`, PulseView continued to acquire the
-  expected approximately 1.66 ms burst frames at 2.4 MS/s, confirming the
+  expected approximately 1.66 ms triggered frames at 2.4 MS/s, confirming the
   Auto/free-running path remained active.
 - With CH1 grounded and source `CH1`, acquisition remained armed until the
   operator stopped it, confirming Normal mode does not fall through to the
@@ -674,5 +679,5 @@ source changes.  The standard libsigrok session-trigger path remains the
 canonical interface and continues to take precedence when present.
 
 Hardware edge triggering is currently enabled only for the validated C6/A6
-burst family.  Official C9/CA Scan and diagnostic C7/C8 ROLL transport remain
+triggered family.  Official C9/CA Scan and diagnostic C7/C8 ROLL transport remain
 unchanged.
