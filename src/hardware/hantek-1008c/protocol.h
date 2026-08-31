@@ -37,7 +37,6 @@
 #define H1008C_AUTO_TRIGGER_TIMEOUT_US (1870 * 1000)
 
 #define H1008C_NUM_HW_CHANNELS  8
-#define H1008C_MVP_CHANNELS     1
 #define H1008C_SAMPLERATE       UINT64_C(2400000)
 #define H1008C_A3_24MSPS        0x0f
 #define H1008C_A2_RANGE_MVP     0x03
@@ -57,6 +56,10 @@ struct dev_context {
 	struct sr_sw_limits limits;
 	uint64_t requested_limit_samples;
 	uint64_t samplerate;
+	uint64_t base_samplerate;
+	uint8_t enabled_mask[H1008C_NUM_HW_CHANNELS];
+	unsigned int enabled_count;
+	unsigned int acquisition_width;
 	gboolean running;
 	uint64_t triggered_count;
 	gboolean calibration_valid;
@@ -78,7 +81,8 @@ struct dev_context {
 SR_PRIV int h1008c_open(struct sr_dev_inst *sdi);
 SR_PRIV int h1008c_close(struct sr_dev_inst *sdi);
 SR_PRIV int h1008c_reopen(struct sr_dev_inst *sdi);
-SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi, uint8_t selected_a3);
+SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi, uint8_t selected_a3,
+		unsigned int enabled_count, const uint8_t enabled_mask[H1008C_NUM_HW_CHANNELS]);
 SR_PRIV int h1008c_acquire_triggered_frame(const struct sr_dev_inst *sdi,
 		float **samples, size_t *sample_count);
 SR_PRIV int h1008c_abort_frame(const struct sr_dev_inst *sdi);

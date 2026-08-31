@@ -75,11 +75,7 @@ static const struct h1008c_rate rate_table[] = {
 	{ UINT64_C(2400000), 0x0f, H1008C_MODE_TRIGGERED },
 };
 
-static const uint64_t samplerates[] = {
-	UINT64_C(2), UINT64_C(4), UINT64_C(8), UINT64_C(20), UINT64_C(40),
-	UINT64_C(80), UINT64_C(200), UINT64_C(400), UINT64_C(800), UINT64_C(1003),
-	UINT64_C(2006), UINT64_C(800000), UINT64_C(2400000),
-};
+
 
 static const char *trigger_sources[] = { "None", "CH1" };
 static const char *trigger_slopes[] = { "r", "f" };
@@ -88,16 +84,68 @@ static const int32_t trigger_matches[] = {
 	SR_TRIGGER_FALLING,
 };
 
-static const struct h1008c_rate *find_rate(uint64_t samplerate)
+static unsigned int acquisition_width_for_count(unsigned int count)
+{
+	static const uint8_t widths[] = { 0, 1, 2, 4, 4, 6, 6, 8, 8 };
+
+	return count <= H1008C_NUM_HW_CHANNELS ? widths[count] : 0;
+}
+
+static unsigned int enabled_channel_count(const struct sr_dev_inst *sdi)
+{
+	GSList *l;
+	unsigned int count = 0;
+
+	for (l = sdi->channels; l; l = l->next) {
+		const struct sr_channel *ch = l->data;
+		if (ch->type == SR_CHANNEL_ANALOG && ch->enabled)
+			count++;
+	}
+	return count;
+}
+
+static void capture_enabled_mask(const struct sr_dev_inst *sdi,
+		struct dev_context *devc)
+{
+	GSList *l;
+
+	memset(devc->enabled_mask, 0, sizeof(devc->enabled_mask));
+	devc->enabled_count = 0;
+	for (l = sdi->channels; l; l = l->next) {
+		const struct sr_channel *ch = l->data;
+		if (ch->type != SR_CHANNEL_ANALOG || !ch->enabled)
+			continue;
+		if (ch->index >= 0 && ch->index < H1008C_NUM_HW_CHANNELS) {
+			devc->enabled_mask[ch->index] = 1;
+			devc->enabled_count++;
+		}
+	}
+	devc->acquisition_width = acquisition_width_for_count(devc->enabled_count);
+}
+
+
+static const struct h1008c_rate *find_effective_rate(uint64_t samplerate,
+		unsigned int width)
 {
 	size_t i;
 
+	if (!width)
+		return NULL;
 	for (i = 0; i < ARRAY_SIZE(rate_table); i++) {
-		if (rate_table[i].samplerate == samplerate)
-			return &rate_table[i];
+		const struct h1008c_rate *rate = &rate_table[i];
+		if (width == 1) {
+			if (rate->samplerate == samplerate)
+				return rate;
+			continue;
+		}
+		/* Multi-channel transport is hardware-validated at A3=0x11 only. */
+		if (rate->mode == H1008C_MODE_TRIGGERED && rate->a3 == 0x11 &&
+		    rate->samplerate / width == samplerate)
+			return rate;
 	}
 	return NULL;
 }
+
 
 
 #define H1008C_TRIGGERED_FRAME_SAMPLES UINT64_C(4000)
@@ -116,9 +164,12 @@ static uint64_t effective_sample_limit(const struct dev_context *devc,
 	 * PulseView also learn the true capture size instead of allocating for
 	 * (for example) 5000 samples and clipping the second 4K frame.
 	 */
-	frames = (requested + H1008C_TRIGGERED_FRAME_SAMPLES - 1) /
-		H1008C_TRIGGERED_FRAME_SAMPLES;
-	return frames * H1008C_TRIGGERED_FRAME_SAMPLES;
+	{
+		uint64_t frame_samples = H1008C_TRIGGERED_FRAME_SAMPLES /
+			MAX(1U, devc->acquisition_width);
+		frames = (requested + frame_samples - 1) / frame_samples;
+		return frames * frame_samples;
+	}
 }
 
 static int apply_sample_limit(struct dev_context *devc)
@@ -193,11 +244,22 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 		sdi->conn = sr_usb_dev_inst_new(libusb_get_bus_number(devlist[i]),
 			libusb_get_device_address(devlist[i]), NULL);
 
-		/* The current driver exposes CH1 only. */
-		sr_channel_new(sdi, 0, SR_CHANNEL_ANALOG, TRUE, "CH1");
+		/* All eight physical analog inputs are selectable; default to CH1 only. */
+		{
+			int ch;
+			for (ch = 0; ch < H1008C_NUM_HW_CHANNELS; ch++) {
+			char name[8];
+			g_snprintf(name, sizeof(name), "CH%d", ch + 1);
+				sr_channel_new(sdi, ch, SR_CHANNEL_ANALOG, ch == 0, name);
+			}
+		}
 		devc = g_malloc0(sizeof(*devc));
 		sr_sw_limits_init(&devc->limits);
 		devc->samplerate = H1008C_SAMPLERATE;
+		devc->base_samplerate = H1008C_SAMPLERATE;
+		devc->enabled_count = 1;
+		devc->acquisition_width = 1;
+		devc->enabled_mask[0] = 1;
 		devc->a3 = H1008C_A3_24MSPS;
 		devc->acquisition_mode = H1008C_MODE_TRIGGERED;
 		devc->trigger_enabled = FALSE;
@@ -284,10 +346,12 @@ static int config_set(uint32_t key, GVariant *data,
 	if (key != SR_CONF_SAMPLERATE)
 		return SR_ERR_NA;
 	samplerate = g_variant_get_uint64(data);
-	rate = find_rate(samplerate);
+	devc->acquisition_width = acquisition_width_for_count(enabled_channel_count(sdi));
+	rate = find_effective_rate(samplerate, devc->acquisition_width);
 	if (!rate)
 		return SR_ERR_SAMPLERATE;
-	devc->samplerate = rate->samplerate;
+	devc->base_samplerate = rate->samplerate;
+	devc->samplerate = samplerate;
 	devc->a3 = rate->a3;
 	devc->acquisition_mode = rate->mode;
 	/*
@@ -310,7 +374,25 @@ static int config_list(uint32_t key, GVariant **data,
 		const struct sr_dev_inst *sdi, const struct sr_channel_group *cg)
 {
 	if (key == SR_CONF_SAMPLERATE) {
-		*data = std_gvar_samplerates(ARRAY_AND_SIZE(samplerates));
+		uint64_t rates[ARRAY_SIZE(rate_table)];
+		unsigned int width, n = 0;
+		size_t i;
+
+		width = acquisition_width_for_count(enabled_channel_count(sdi));
+		for (i = 0; i < ARRAY_SIZE(rate_table); i++) {
+			const struct h1008c_rate *rate = &rate_table[i];
+			uint64_t effective;
+
+			if (width == 1)
+				effective = rate->samplerate;
+			else if (rate->mode == H1008C_MODE_TRIGGERED && rate->a3 == 0x11)
+				effective = rate->samplerate / width;
+			else
+				continue;
+			if (!n || rates[n - 1] != effective)
+				rates[n++] = effective;
+		}
+		*data = std_gvar_samplerates(rates, n);
 		return SR_OK;
 	}
 	if (key == SR_CONF_TRIGGER_SOURCE) {
@@ -435,13 +517,16 @@ static void send_analog_samples(struct sr_dev_inst *sdi, float *samples,
 	struct sr_analog_encoding encoding;
 	struct sr_analog_meaning meaning;
 	struct sr_analog_spec spec;
+	GSList *l;
+	gboolean calibrated;
 
 	sr_analog_init(&analog, &encoding, &meaning, &spec, 0);
 	packet.type = SR_DF_ANALOG;
 	packet.payload = &analog;
 	analog.num_samples = count;
 	analog.data = samples;
-	if (devc->calibration_valid) {
+	calibrated = devc->calibration_valid && devc->enabled_count == 1 && devc->enabled_mask[0];
+	if (calibrated) {
 		analog.meaning->mq = SR_MQ_VOLTAGE;
 		analog.meaning->unit = SR_UNIT_VOLT;
 		analog.encoding->digits = 3;
@@ -453,7 +538,12 @@ static void send_analog_samples(struct sr_dev_inst *sdi, float *samples,
 		analog.spec->spec_digits = 0;
 	}
 	analog.meaning->mqflags = 0;
-	analog.meaning->channels = g_slist_append(NULL, sdi->channels->data);
+	analog.meaning->channels = NULL;
+	for (l = sdi->channels; l; l = l->next) {
+		struct sr_channel *ch = l->data;
+		if (ch->type == SR_CHANNEL_ANALOG && ch->enabled)
+			analog.meaning->channels = g_slist_append(analog.meaning->channels, ch);
+	}
 
 	if (frame)
 		std_session_send_df_frame_begin(sdi);
@@ -519,7 +609,8 @@ static int receive_samples(int fd, int revents, void *cb_data)
 		return TRUE;
 	}
 
-	calibrate_samples(devc, samples, remain);
+	if (devc->enabled_count == 1 && devc->enabled_mask[0])
+		calibrate_samples(devc, samples, remain * devc->enabled_count);
 	send_analog_samples(sdi, samples, remain, frame);
 	g_free(samples);
 
@@ -561,6 +652,10 @@ static int configure_session_trigger(const struct sr_dev_inst *sdi)
 		 */
 		if (!devc->trigger_source_enabled)
 			return SR_OK;
+		if (!devc->enabled_mask[0]) {
+			sr_err("CH1 must be enabled when CH1 hardware trigger is selected.");
+			return SR_ERR_ARG;
+		}
 		if (devc->acquisition_mode != H1008C_MODE_TRIGGERED) {
 			sr_err("Hantek 1008C hardware edge triggering is currently "
 				"supported in triggered mode only.");
@@ -582,6 +677,10 @@ static int configure_session_trigger(const struct sr_dev_inst *sdi)
 	if (!match->channel || match->channel->index != 0 ||
 	    match->channel->type != SR_CHANNEL_ANALOG) {
 		sr_err("Hantek 1008C hardware trigger source is CH1 only.");
+		return SR_ERR_ARG;
+	}
+	if (!devc->enabled_mask[0]) {
+		sr_err("CH1 must be enabled for the Hantek 1008C hardware trigger.");
 		return SR_ERR_ARG;
 	}
 	if (match->match == SR_TRIGGER_RISING)
@@ -606,6 +705,21 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 	struct dev_context *devc = sdi->priv;
 	struct sr_dev_inst *mutable_sdi = (struct sr_dev_inst *)sdi;
 
+	capture_enabled_mask(sdi, devc);
+	if (!devc->enabled_count) {
+		sr_err("Hantek 1008C requires at least one enabled analog channel.");
+		return SR_ERR_ARG;
+	}
+	if (devc->enabled_count > 1 &&
+	    (devc->acquisition_mode != H1008C_MODE_TRIGGERED || devc->a3 != 0x11)) {
+		sr_err("Multi-channel acquisition is currently validated only for "
+			"Triggered A3=0x11.");
+		return SR_ERR_NA;
+	}
+	devc->samplerate = devc->base_samplerate / devc->acquisition_width;
+	if (apply_sample_limit(devc) != SR_OK)
+		return SR_ERR;
+
 	/*
 	 * The 1008C can logically disappear/re-enumerate after several seconds
 	 * without protocol traffic. PulseView commonly keeps the device instance
@@ -628,7 +742,7 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 	 * h1008c_start_roll() deliberately sends the same A3 again immediately
 	 * before A4 02, matching the validated C7/C8 laboratory sequence.
 	 */
-	if (h1008c_startup(sdi, devc->a3) != SR_OK)
+	if (h1008c_startup(sdi, devc->a3, devc->enabled_count, devc->enabled_mask) != SR_OK)
 		return SR_ERR;
 	devc->running = TRUE;
 	devc->triggered_count = 0;
@@ -637,6 +751,8 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 	devc->triggered_arm_us = 0;
 	sr_sw_limits_acquisition_start(&devc->limits);
 	std_session_send_df_header(sdi);
+	(void)sr_session_send_meta(sdi, SR_CONF_SAMPLERATE,
+		g_variant_new_uint64(devc->samplerate));
 	devc->scan_carry_len = 0;
 	if (devc->acquisition_mode == H1008C_MODE_ROLL) {
 		if (h1008c_start_roll(sdi, devc->a3) != SR_OK) {

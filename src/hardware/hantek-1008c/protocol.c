@@ -276,7 +276,8 @@ static int startup_range_pass(const struct sr_dev_inst *sdi, uint8_t range)
 	return SR_OK;
 }
 
-SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi, uint8_t selected_a3)
+SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi, uint8_t selected_a3,
+		unsigned int enabled_count, const uint8_t enabled_mask[H1008C_NUM_HW_CHANNELS])
 {
 	/* Full direct-ADC initialization validated against mfg92/hantek1008py. */
 	static const uint8_t b0[] = { 0xb0 };
@@ -302,8 +303,8 @@ SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi, uint8_t selected_a3)
 	static const uint8_t ac_pre[] = { 0xac, 0x00, 0xc8, 0x00, 0x02, 0xbd, 0x00, 0x02, 0xbd };
 	static const uint8_t e4[] = { 0xe4, 0x01 };
 	static const uint8_t e6[] = { 0xe6, 0x01 };
-	static const uint8_t a0_ch1[] = { 0xa0, 0x01 };
-	static const uint8_t aa_ch1[] = { 0xaa, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+	uint8_t a0_selected[] = { 0xa0, (uint8_t)enabled_count };
+	uint8_t aa_selected[] = { 0xaa, 0, 0, 0, 0, 0, 0, 0, 0 };
 	static const uint8_t a2_ch1[] = { 0xa2, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03 };
 	static const uint8_t ac_final[] = { 0xac, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x05, 0x79 };
 	static const uint8_t ab[] = { 0xab, 0x08, 0x00 };
@@ -321,12 +322,15 @@ SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi, uint8_t selected_a3)
 		{ e5, sizeof(e5) }, { f7, sizeof(f7) }, { f8, sizeof(f8) },
 		{ fa, sizeof(fa) }, { a3_selected, sizeof(a3_selected) },
 		{ ac_pre, sizeof(ac_pre) }, { e4, sizeof(e4) }, { e6, sizeof(e6) },
-		{ f3, sizeof(f3) }, { a0_ch1, sizeof(a0_ch1) },
-		{ aa_ch1, sizeof(aa_ch1) }, { a2_ch1, sizeof(a2_ch1) },
+		{ f3, sizeof(f3) }, { a0_selected, sizeof(a0_selected) },
+		{ aa_selected, sizeof(aa_selected) }, { a2_ch1, sizeof(a2_ch1) },
 		{ a3_selected, sizeof(a3_selected) }, { c1, sizeof(c1) }, { a7, sizeof(a7) },
 		{ ac_final, sizeof(ac_final) }, { ab, sizeof(ab) }, { e9, sizeof(e9) },
 	};
 	size_t i;
+
+	for (i = 0; i < H1008C_NUM_HW_CHANNELS; i++)
+		aa_selected[i + 1] = enabled_mask[i] ? 1 : 0;
 
 	if (command(sdi, b0, sizeof(b0)) != SR_OK)
 		return SR_ERR;
@@ -350,8 +354,8 @@ SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi, uint8_t selected_a3)
 		if (command(sdi, init3_tail[i].data, init3_tail[i].len) != SR_OK)
 			return SR_ERR;
 	}
-	sr_info("Hantek 1008C direct-ADC initialization complete (CH1, A3=%02x).",
-		selected_a3);
+	sr_info("Hantek 1008C direct-ADC initialization complete (%u channel(s), A3=%02x).",
+		enabled_count, selected_a3);
 	return SR_OK;
 }
 
@@ -469,18 +473,34 @@ SR_PRIV int h1008c_acquire_triggered_frame(const struct sr_dev_inst *sdi,
 		return ret;
 
 	n = total / 2;
-	out = g_try_new(float, n);
+	if (!devc->enabled_count || !devc->acquisition_width) {
+		g_free(raw);
+		return SR_ERR_BUG;
+	}
+	/*
+	 * A3=0x11 multi-channel direct ADC is a fixed-width physical stream.
+	 * Enabled AA channels are compacted in ascending physical-channel order;
+	 * widths 4/6/8 contain one final dummy slot for logical counts 3/5/7.
+	 * Emit complete rows only so every visible channel has equal sample count.
+	 */
+	*sample_count = n / devc->acquisition_width;
+	out = g_try_new(float, (*sample_count) * devc->enabled_count);
 	if (!out) {
 		g_free(raw);
 		return SR_ERR_MALLOC;
 	}
-	for (i = 0; i < n; i++)
-		out[i] = (float)(((uint16_t)raw[i * 2] |
-			((uint16_t)raw[i * 2 + 1] << 8)) & 0x0fff);
+	for (i = 0; i < *sample_count; i++) {
+		size_t lane;
+		for (lane = 0; lane < devc->enabled_count; lane++) {
+			size_t word = i * devc->acquisition_width + lane;
+			out[i * devc->enabled_count + lane] =
+				(float)(((uint16_t)raw[word * 2] |
+				((uint16_t)raw[word * 2 + 1] << 8)) & 0x0fff);
+		}
+	}
 	g_free(raw);
 
 	*samples = out;
-	*sample_count = n;
 	return SR_OK;
 }
 

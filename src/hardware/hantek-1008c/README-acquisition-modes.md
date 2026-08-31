@@ -773,3 +773,25 @@ mapping is directly established as 1 ns/div = A3 00, 2 ns/div = A3 01, and
 5 ns/div = A3 02.  The earlier duplicate 1 ns/2 ns A3=01 interpretation was a
 capture/interpretation miss.  This mapping alone does not authorize a production
 samplerate; effective timing must still be measured under Linux.
+
+## Multi-channel direct ADC (validated 2026-08-30)
+
+A3=0x11 Triggered mode now has hardware-validated multi-channel routing.
+`AA` selects arbitrary physical inputs; selected channels are compacted in
+ascending physical-channel order.  The physical widths for 1..8 enabled
+channels are 1,2,4,4,6,6,8,8.  For logical counts 3,5,7 the final physical slot
+is a dummy lane and must not be exposed as a channel sample.
+
+At A3=0x11 the aggregate stream is ~800 kword/s, so effective per-channel rates
+are approximately 800k,400k,200k,200k,133333,133333,100k,100k samples/s.
+Sparse CH1+CH8 routing and every odd dummy boundary (CH4/CH6/CH8) were verified
+with independent 1 kHz and 4 kHz references.
+
+The exact role of A0 remains unresolved; changing it between logical count and
+rounded width did not alter the measured geometry.  The driver writes the
+logical enabled count to A0 and the true physical mask to AA.
+
+Multi-channel A3=0x0f has not yet been independently validated, so the initial
+production implementation intentionally restricts multi-channel acquisition to
+Triggered A3=0x11.  ROLL and Scan remain CH1-only pending separate transport
+validation.
