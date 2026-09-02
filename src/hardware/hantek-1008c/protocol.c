@@ -478,7 +478,7 @@ SR_PRIV int h1008c_acquire_triggered_frame(const struct sr_dev_inst *sdi,
 		return SR_ERR_BUG;
 	}
 	/*
-	 * A3=0x11 multi-channel direct ADC is a fixed-width physical stream.
+	 * A3=0x11/0x0f multi-channel direct ADC is a fixed-width physical stream.
 	 * Enabled AA channels are compacted in ascending physical-channel order;
 	 * widths 4/6/8 contain one final dummy slot for logical counts 3/5/7.
 	 * Emit complete rows only so every visible channel has equal sample count.

@@ -138,8 +138,9 @@ static const struct h1008c_rate *find_effective_rate(uint64_t samplerate,
 				return rate;
 			continue;
 		}
-		/* Multi-channel transport is hardware-validated at A3=0x11 only. */
-		if (rate->mode == H1008C_MODE_TRIGGERED && rate->a3 == 0x11 &&
+		/* Multi-channel transport is validated at both triggered base rates. */
+		if (rate->mode == H1008C_MODE_TRIGGERED &&
+		    (rate->a3 == 0x11 || rate->a3 == 0x0f) &&
 		    rate->samplerate / width == samplerate)
 			return rate;
 	}
@@ -378,14 +379,17 @@ static int config_list(uint32_t key, GVariant **data,
 		unsigned int width, n = 0;
 		size_t i;
 
-		width = acquisition_width_for_count(enabled_channel_count(sdi));
+		/* Keep configuration usable while the frontend temporarily has no
+		 * channels selected; acquisition_start still rejects that state. */
+		width = MAX(1U, acquisition_width_for_count(enabled_channel_count(sdi)));
 		for (i = 0; i < ARRAY_SIZE(rate_table); i++) {
 			const struct h1008c_rate *rate = &rate_table[i];
 			uint64_t effective;
 
 			if (width == 1)
 				effective = rate->samplerate;
-			else if (rate->mode == H1008C_MODE_TRIGGERED && rate->a3 == 0x11)
+			else if (rate->mode == H1008C_MODE_TRIGGERED &&
+				 (rate->a3 == 0x11 || rate->a3 == 0x0f))
 				effective = rate->samplerate / width;
 			else
 				continue;
@@ -408,6 +412,26 @@ static int config_list(uint32_t key, GVariant **data,
 		return SR_OK;
 	}
 	return STD_CONFIG_LIST(key, data, sdi, cg, scanopts, drvopts, devopts);
+}
+
+static int config_channel_set(const struct sr_dev_inst *sdi,
+		struct sr_channel *ch, unsigned int changes)
+{
+	struct dev_context *devc = sdi->priv;
+
+	(void)ch;
+	if (!(changes & SR_CHANNEL_SET_ENABLED))
+		return SR_OK;
+
+	/* sr_dev_channel_enable() has already updated sdi->channels. Refresh all
+	 * channel-count-derived configuration immediately, before the next Run. */
+	capture_enabled_mask(sdi, devc);
+	if (devc->acquisition_width)
+		devc->samplerate = devc->base_samplerate / devc->acquisition_width;
+	else
+		devc->samplerate = devc->base_samplerate;
+
+	return apply_sample_limit(devc);
 }
 
 static int dev_open(struct sr_dev_inst *sdi)
@@ -711,9 +735,10 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 		return SR_ERR_ARG;
 	}
 	if (devc->enabled_count > 1 &&
-	    (devc->acquisition_mode != H1008C_MODE_TRIGGERED || devc->a3 != 0x11)) {
+	    (devc->acquisition_mode != H1008C_MODE_TRIGGERED ||
+	     (devc->a3 != 0x11 && devc->a3 != 0x0f))) {
 		sr_err("Multi-channel acquisition is currently validated only for "
-			"Triggered A3=0x11.");
+			"Triggered A3=0x11 and A3=0x0f.");
 		return SR_ERR_NA;
 	}
 	devc->samplerate = devc->base_samplerate / devc->acquisition_width;
@@ -812,6 +837,7 @@ static struct sr_dev_driver hantek_1008c_driver_info = {
 	.dev_clear = std_dev_clear,
 	.config_get = config_get,
 	.config_set = config_set,
+	.config_channel_set = config_channel_set,
 	.config_list = config_list,
 	.dev_open = dev_open,
 	.dev_close = dev_close,
