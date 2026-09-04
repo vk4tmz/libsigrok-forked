@@ -798,4 +798,12 @@ rounded width did not alter the measured geometry.  The driver writes the
 logical enabled count to A0 and the true physical mask to AA.
 
 Production multi-channel acquisition supports Triggered A3=0x11 and A3=0x0f.
+
+Multi-channel frames are emitted as one analogue packet per enabled channel.
+This is required because a sigrok analogue packet has one shared meaning and
+encoding, while Hantek voltage calibration is per device, channel, and range.
+CH1 is emitted in volts when its persisted A2=0x03 calibration is available;
+channels without independently established calibration remain explicitly
+labelled as raw ADC counts.  CH1 calibration is never applied to another
+channel merely to make its trace look plausible.
 ROLL and Scan remain CH1-only pending separate transport validation.

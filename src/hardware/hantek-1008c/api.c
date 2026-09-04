@@ -532,24 +532,21 @@ static void calibrate_samples(const struct dev_context *devc,
 			devc->calibration_volts_per_count);
 }
 
-static void send_analog_samples(struct sr_dev_inst *sdi, float *samples,
-		size_t count, gboolean frame)
+static void send_analog_channel(struct sr_dev_inst *sdi,
+		struct sr_channel *channel, float *samples, size_t count,
+		gboolean calibrated)
 {
-	struct dev_context *devc = sdi->priv;
 	struct sr_datafeed_packet packet;
 	struct sr_datafeed_analog analog;
 	struct sr_analog_encoding encoding;
 	struct sr_analog_meaning meaning;
 	struct sr_analog_spec spec;
-	GSList *l;
-	gboolean calibrated;
 
 	sr_analog_init(&analog, &encoding, &meaning, &spec, 0);
 	packet.type = SR_DF_ANALOG;
 	packet.payload = &analog;
 	analog.num_samples = count;
 	analog.data = samples;
-	calibrated = devc->calibration_valid && devc->enabled_count == 1 && devc->enabled_mask[0];
 	if (calibrated) {
 		analog.meaning->mq = SR_MQ_VOLTAGE;
 		analog.meaning->unit = SR_UNIT_VOLT;
@@ -562,19 +559,52 @@ static void send_analog_samples(struct sr_dev_inst *sdi, float *samples,
 		analog.spec->spec_digits = 0;
 	}
 	analog.meaning->mqflags = 0;
-	analog.meaning->channels = NULL;
-	for (l = sdi->channels; l; l = l->next) {
-		struct sr_channel *ch = l->data;
-		if (ch->type == SR_CHANNEL_ANALOG && ch->enabled)
-			analog.meaning->channels = g_slist_append(analog.meaning->channels, ch);
-	}
+	analog.meaning->channels = g_slist_append(NULL, channel);
+
+	sr_session_send(sdi, &packet);
+	g_slist_free(analog.meaning->channels);
+}
+
+static int send_analog_samples(struct sr_dev_inst *sdi, const float *samples,
+		size_t count, gboolean frame)
+{
+	struct dev_context *devc = sdi->priv;
+	struct sr_channel *ch;
+	float *channel_samples;
+	GSList *l;
+	size_t i, lane;
+	gboolean calibrated;
+
+	/*
+	 * Each channel needs its own packet because analogue meaning and encoding
+	 * apply to the whole packet. CH1 has a persisted voltage calibration;
+	 * channels without an independently established calibration must remain
+	 * honest raw ADC counts rather than inheriting CH1's scale and offset.
+	 */
+	channel_samples = g_try_new(float, count);
+	if (!channel_samples)
+		return SR_ERR_MALLOC;
 
 	if (frame)
 		std_session_send_df_frame_begin(sdi);
-	sr_session_send(sdi, &packet);
+	lane = 0;
+	for (l = sdi->channels; l; l = l->next) {
+		ch = l->data;
+		if (ch->type != SR_CHANNEL_ANALOG || !ch->enabled)
+			continue;
+		for (i = 0; i < count; i++)
+			channel_samples[i] = samples[i * devc->enabled_count + lane];
+		calibrated = ch->index == 0 && devc->calibration_valid;
+		if (calibrated)
+			calibrate_samples(devc, channel_samples, count);
+		send_analog_channel(sdi, ch, channel_samples, count, calibrated);
+		lane++;
+	}
 	if (frame)
 		std_session_send_df_frame_end(sdi);
-	g_slist_free(analog.meaning->channels);
+	g_free(channel_samples);
+
+	return SR_OK;
 }
 
 static int receive_samples(int fd, int revents, void *cb_data)
@@ -633,10 +663,13 @@ static int receive_samples(int fd, int revents, void *cb_data)
 		return TRUE;
 	}
 
-	if (devc->enabled_count == 1 && devc->enabled_mask[0])
-		calibrate_samples(devc, samples, remain * devc->enabled_count);
-	send_analog_samples(sdi, samples, remain, frame);
+	ret = send_analog_samples(sdi, samples, remain, frame);
 	g_free(samples);
+	if (ret != SR_OK) {
+		sr_err("Unable to allocate per-channel analogue sample buffer.");
+		sr_dev_acquisition_stop(sdi);
+		return TRUE;
+	}
 
 	sr_sw_limits_update_samples_read(&devc->limits, remain);
 	if (frame) {
