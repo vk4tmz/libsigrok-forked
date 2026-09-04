@@ -807,3 +807,34 @@ available; channels without independently established calibration remain
 explicitly labelled as raw ADC counts.  One channel's calibration is never
 applied to another channel merely to make its trace look plausible.
 ROLL and Scan remain CH1-only pending separate transport validation.
+
+### PulseView end-to-end validation (2026-09-05)
+
+Contiguous CH1..CHN configurations were exercised through the installed native
+libsigrok driver and PulseView for every N from 1 through 8. Both advertised
+Triggered rates passed at each physical width:
+
+| Enabled channels | Physical width | Fast rate | Slow rate | Samples/channel | Result |
+|---:|---:|---:|---:|---:|:---:|
+| 1 | 1 | 2.4 MSa/s | 800 kSa/s | 4000 | PASS |
+| 2 | 2 | 1.2 MSa/s | 400 kSa/s | 2000 | PASS |
+| 3 | 4 | 600 kSa/s | 200 kSa/s | 1000 | PASS |
+| 4 | 4 | 600 kSa/s | 200 kSa/s | 1000 | PASS |
+| 5 | 6 | 400 kSa/s | 133.333 kSa/s | 666 | PASS |
+| 6 | 6 | 400 kSa/s | 133.333 kSa/s | 666 | PASS |
+| 7 | 8 | 300 kSa/s | 100 kSa/s | 500 | PASS |
+| 8 | 8 | 300 kSa/s | 100 kSa/s | 500 | PASS |
+
+CH1 carried a clean 4 kHz sine while the independent 1 kHz / nominal 2 Vp-p
+square reference was moved successively through CH2..CH8. Channel identity and
+waveform shape remained correct at both rates. Grounded inputs remained near
+zero after their own persisted A2=03 calibration was loaded. The odd-width
+dummy lanes at logical counts 3, 5, and 7 were not exposed and did not leak into
+visible samples.
+
+With all eight channels enabled, PulseView showed 500 samples per channel and
+the expected frame spans: approximately 1.667 ms at 300 kSa/s/channel and
+5.000 ms at 100 kSa/s/channel. The visible cycle counts of both known signals
+agreed with those rates. Full-resolution screenshots are retained with the
+hardware-validation evidence in the companion Hantek protocol-laboratory
+repository rather than duplicated in the production driver tree.
