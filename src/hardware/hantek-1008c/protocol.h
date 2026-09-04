@@ -62,9 +62,9 @@ struct dev_context {
 	unsigned int acquisition_width;
 	gboolean running;
 	uint64_t triggered_count;
-	gboolean calibration_valid;
-	double calibration_zero_adc;
-	double calibration_volts_per_count;
+	gboolean calibration_valid[H1008C_NUM_HW_CHANNELS];
+	double calibration_zero_adc[H1008C_NUM_HW_CHANNELS];
+	double calibration_volts_per_count[H1008C_NUM_HW_CHANNELS];
 	uint8_t a3;
 	enum h1008c_acquisition_mode acquisition_mode;
 	gboolean trigger_enabled;

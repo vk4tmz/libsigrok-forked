@@ -452,10 +452,12 @@ static void load_persistent_calibration(const struct sr_dev_inst *sdi)
 	gchar *path, *section;
 	gint version;
 	double zero_adc, volts_per_count;
+	unsigned int channel;
 
-	devc->calibration_valid = FALSE;
-	devc->calibration_zero_adc = 0.0;
-	devc->calibration_volts_per_count = 0.0;
+	memset(devc->calibration_valid, 0, sizeof(devc->calibration_valid));
+	memset(devc->calibration_zero_adc, 0, sizeof(devc->calibration_zero_adc));
+	memset(devc->calibration_volts_per_count, 0,
+		sizeof(devc->calibration_volts_per_count));
 
 	path = g_build_filename(g_get_user_data_dir(), "hantek-1008c",
 		"calibration.ini", NULL);
@@ -480,56 +482,57 @@ static void load_persistent_calibration(const struct sr_dev_inst *sdi)
 		return;
 	}
 
-	section = g_strdup_printf("device %s channel CH1 range %02X",
-		sdi->connection_id ? sdi->connection_id : "", H1008C_A2_RANGE_MVP);
-	if (!g_key_file_has_group(keyfile, section)) {
-		sr_warn("No persisted calibration for %s CH1 A2=%02X; using raw ADC counts.",
-			sdi->connection_id ? sdi->connection_id : "unknown-port",
+	for (channel = 0; channel < H1008C_NUM_HW_CHANNELS; channel++) {
+		section = g_strdup_printf("device %s channel CH%u range %02X",
+			sdi->connection_id ? sdi->connection_id : "", channel + 1,
 			H1008C_A2_RANGE_MVP);
+		if (!g_key_file_has_group(keyfile, section)) {
+			g_free(section);
+			continue;
+		}
+
+		error = NULL;
+		zero_adc = g_key_file_get_double(keyfile, section, "zero_adc", &error);
+		if (error) {
+			sr_warn("Invalid zero_adc in Hantek calibration section %s.", section);
+			g_clear_error(&error);
+			g_free(section);
+			continue;
+		}
+		volts_per_count = g_key_file_get_double(keyfile, section,
+			"volts_per_count", &error);
+		if (error || !isfinite(zero_adc) || !isfinite(volts_per_count) ||
+			volts_per_count <= 0.0) {
+			sr_warn("Invalid Hantek calibration values in section %s.", section);
+			g_clear_error(&error);
+			g_free(section);
+			continue;
+		}
+
+		devc->calibration_zero_adc[channel] = zero_adc;
+		devc->calibration_volts_per_count[channel] = volts_per_count;
+		devc->calibration_valid[channel] = TRUE;
+		sr_info("Loaded calibration for CH%u A2=%02X: zero=%.3f, "
+			"scale=%.9g V/count.", channel + 1, H1008C_A2_RANGE_MVP,
+			zero_adc, volts_per_count);
 		g_free(section);
-		g_key_file_free(keyfile);
-		g_free(path);
-		return;
 	}
 
-	error = NULL;
-	zero_adc = g_key_file_get_double(keyfile, section, "zero_adc", &error);
-	if (error) {
-		sr_warn("Invalid zero_adc in Hantek calibration section %s.", section);
-		g_clear_error(&error);
-		goto out;
-	}
-	volts_per_count = g_key_file_get_double(keyfile, section,
-		"volts_per_count", &error);
-	if (error || !isfinite(zero_adc) || !isfinite(volts_per_count) ||
-		volts_per_count <= 0.0) {
-		sr_warn("Invalid Hantek calibration values in section %s.", section);
-		g_clear_error(&error);
-		goto out;
-	}
-
-	devc->calibration_zero_adc = zero_adc;
-	devc->calibration_volts_per_count = volts_per_count;
-	devc->calibration_valid = TRUE;
-	sr_info("Loaded calibration for CH1 A2=%02X: zero=%.3f, scale=%.9g V/count.",
-		H1008C_A2_RANGE_MVP, zero_adc, volts_per_count);
-
-out:
-	g_free(section);
 	g_key_file_free(keyfile);
 	g_free(path);
 }
 
 static void calibrate_samples(const struct dev_context *devc,
-		float *samples, size_t count)
+		unsigned int channel, float *samples, size_t count)
 {
 	size_t i;
 
-	if (!devc->calibration_valid)
+	if (channel >= H1008C_NUM_HW_CHANNELS ||
+		!devc->calibration_valid[channel])
 		return;
 	for (i = 0; i < count; i++)
-		samples[i] = (float)((samples[i] - devc->calibration_zero_adc) *
-			devc->calibration_volts_per_count);
+		samples[i] = (float)((samples[i] - devc->calibration_zero_adc[channel]) *
+			devc->calibration_volts_per_count[channel]);
 }
 
 static void send_analog_channel(struct sr_dev_inst *sdi,
@@ -594,9 +597,10 @@ static int send_analog_samples(struct sr_dev_inst *sdi, const float *samples,
 			continue;
 		for (i = 0; i < count; i++)
 			channel_samples[i] = samples[i * devc->enabled_count + lane];
-		calibrated = ch->index == 0 && devc->calibration_valid;
+		calibrated = ch->index >= 0 && ch->index < H1008C_NUM_HW_CHANNELS &&
+			devc->calibration_valid[ch->index];
 		if (calibrated)
-			calibrate_samples(devc, channel_samples, count);
+			calibrate_samples(devc, ch->index, channel_samples, count);
 		send_analog_channel(sdi, ch, channel_samples, count, calibrated);
 		lane++;
 	}
