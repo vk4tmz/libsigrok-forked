@@ -42,11 +42,13 @@ struct h1008c_rate {
 };
 
 /*
- * PulseView-facing CH1 Scan and Roll rates. Diagnostic C7/C8 ROLL rates retain
+ * PulseView-facing aggregate Scan and CH1-only Roll rates. Diagnostic C7/C8
+ * ROLL rates retain
  * their established word0-only mapping except that official Scan takes
  * precedence at the shared public 2 samples/s setting.
- * Official C9/CA Scan is exposed for the validated A3=1A..22 region, using
- * two temporally ordered CH1 observations per 4-byte row. Nominal Scan rates
+ * Official C9/CA Scan is exposed for the validated A3=1A..22 region. Scan
+ * words are interleaved across the exact enabled-channel count, without the
+ * odd-count dummy lanes used by Triggered mode. Nominal aggregate Scan rates
  * are 800/400/200/80/40/20/8/4/2 samples/s; measured host-side row cadences
  * follow the corresponding 2x observation model, and reference-tone timing
  * validates that interpretation. Sub-1 sample/s settings are intentionally
@@ -78,8 +80,8 @@ static const struct h1008c_rate rate_table[] = {
  * Aggregate direct-ADC rates for multi-channel Triggered mode.
  *
  * The physical-width table and every A3 entry below are hardware-validated.
- * Keep these separate from rate_table so the established CH1-only Scan/ROLL
- * list and its mode-disambiguating samplerates remain unchanged.
+ * Keep these separate from rate_table so Triggered's padded physical-width
+ * divisor cannot be confused with Scan's exact enabled-channel divisor.
  *
  * PulseView is given the per-channel rate, calculated as aggregate / physical
  * acquisition width.  Integer division is intentional because libsigrok's
@@ -121,6 +123,16 @@ static unsigned int acquisition_width_for_count(unsigned int count)
 	return count <= H1008C_NUM_HW_CHANNELS ? widths[count] : 0;
 }
 
+static unsigned int rate_divisor_for_mode(enum h1008c_acquisition_mode mode,
+		unsigned int enabled_count)
+{
+	if (!enabled_count)
+		return 0;
+	if (mode == H1008C_MODE_SCAN)
+		return enabled_count;
+	return acquisition_width_for_count(enabled_count);
+}
+
 static unsigned int enabled_channel_count(const struct sr_dev_inst *sdi)
 {
 	GSList *l;
@@ -155,13 +167,13 @@ static void capture_enabled_mask(const struct sr_dev_inst *sdi,
 
 
 static const struct h1008c_rate *find_effective_rate(uint64_t samplerate,
-		unsigned int width, enum h1008c_acquisition_mode mode)
+		unsigned int divisor, enum h1008c_acquisition_mode mode)
 {
 	size_t i;
 
-	if (!width)
+	if (!divisor)
 		return NULL;
-	if (width == 1) {
+	if (divisor == 1) {
 		if (mode == H1008C_MODE_TRIGGERED) {
 			for (i = 0;
 			     i < ARRAY_SIZE(multichannel_triggered_rate_table); i++) {
@@ -181,28 +193,37 @@ static const struct h1008c_rate *find_effective_rate(uint64_t samplerate,
 		}
 		return NULL;
 	}
-	if (mode != H1008C_MODE_TRIGGERED)
+	if (mode == H1008C_MODE_ROLL)
 		return NULL;
 
-	for (i = 0; i < ARRAY_SIZE(multichannel_triggered_rate_table); i++) {
-		const struct h1008c_rate *rate =
-			&multichannel_triggered_rate_table[i];
+	if (mode == H1008C_MODE_SCAN) {
+		for (i = 0; i < ARRAY_SIZE(rate_table); i++) {
+			const struct h1008c_rate *rate = &rate_table[i];
 
-		if (rate->samplerate / width == samplerate)
+			if (rate->mode == mode && rate->samplerate >= divisor &&
+			    rate->samplerate / divisor == samplerate)
+				return rate;
+		}
+		return NULL;
+	}
+	for (i = 0; i < ARRAY_SIZE(multichannel_triggered_rate_table); i++) {
+		const struct h1008c_rate *rate = &multichannel_triggered_rate_table[i];
+
+		if (rate->samplerate / divisor == samplerate)
 			return rate;
 	}
 	return NULL;
 }
 
 static const struct h1008c_rate *default_rate_for_mode(
-		enum h1008c_acquisition_mode mode, unsigned int width)
+		enum h1008c_acquisition_mode mode, unsigned int divisor)
 {
 	const struct h1008c_rate *selected = NULL;
 	size_t i;
 
-	if (width > 1) {
-		if (mode != H1008C_MODE_TRIGGERED)
-			return NULL;
+	if (divisor > 1 && mode == H1008C_MODE_ROLL)
+		return NULL;
+	if (divisor > 1 && mode == H1008C_MODE_TRIGGERED) {
 		return &multichannel_triggered_rate_table[
 			ARRAY_SIZE(multichannel_triggered_rate_table) - 1];
 	}
@@ -219,12 +240,12 @@ static const struct h1008c_rate *default_rate_for_mode(
 }
 
 static int select_rate(struct dev_context *devc,
-		const struct h1008c_rate *rate, unsigned int width)
+		const struct h1008c_rate *rate, unsigned int divisor)
 {
-	if (!rate || !width)
+	if (!rate || !divisor)
 		return SR_ERR_SAMPLERATE;
 	devc->base_samplerate = rate->samplerate;
-	devc->samplerate = width > 1 ? rate->samplerate / width : rate->samplerate;
+	devc->samplerate = rate->samplerate / divisor;
 	devc->a3 = rate->a3;
 	devc->acquisition_mode = rate->mode;
 	return apply_sample_limit(devc);
@@ -415,7 +436,7 @@ static int config_set(uint32_t key, GVariant *data,
 		const struct h1008c_rate *default_rate;
 		const char *name = g_variant_get_string(data, NULL);
 		enum h1008c_acquisition_mode mode;
-		unsigned int width;
+		unsigned int enabled_count, divisor;
 
 		if (!strcmp(name, "Trigger"))
 			mode = H1008C_MODE_TRIGGERED;
@@ -425,17 +446,16 @@ static int config_set(uint32_t key, GVariant *data,
 			mode = H1008C_MODE_ROLL;
 		else
 			return SR_ERR_ARG;
-		width = acquisition_width_for_count(enabled_channel_count(sdi));
-		if (!width)
-			width = 1;
-		if (width > 1 && mode != H1008C_MODE_TRIGGERED) {
-			sr_err("Scan and Roll device modes require exactly one enabled channel.");
+		enabled_count = MAX(1U, enabled_channel_count(sdi));
+		divisor = rate_divisor_for_mode(mode, enabled_count);
+		if (enabled_count > 1 && mode == H1008C_MODE_ROLL) {
+			sr_err("Roll device mode requires exactly one enabled channel.");
 			return SR_ERR_NA;
 		}
 		if (mode == devc->acquisition_mode)
 			return SR_OK;
-		default_rate = default_rate_for_mode(mode, width);
-		if (select_rate(devc, default_rate, width) != SR_OK)
+		default_rate = default_rate_for_mode(mode, divisor);
+		if (select_rate(devc, default_rate, divisor) != SR_OK)
 			return SR_ERR;
 		sr_info("Selected %s device mode; defaulting to %" PRIu64
 			" samples/s, A3=%02x.", name, devc->samplerate, devc->a3);
@@ -466,7 +486,9 @@ static int config_set(uint32_t key, GVariant *data,
 		return SR_ERR_NA;
 	samplerate = g_variant_get_uint64(data);
 	devc->acquisition_width = acquisition_width_for_count(enabled_channel_count(sdi));
-	rate = find_effective_rate(samplerate, devc->acquisition_width,
+	rate = find_effective_rate(samplerate,
+		rate_divisor_for_mode(devc->acquisition_mode,
+			enabled_channel_count(sdi)),
 		devc->acquisition_mode);
 	if (!rate)
 		return SR_ERR_SAMPLERATE;
@@ -476,7 +498,9 @@ static int config_set(uint32_t key, GVariant *data,
 	 * advertises an integral number of 4K frames while continuous ROLL/Scan
 	 * modes remain exact.
 	 */
-	if (select_rate(devc, rate, devc->acquisition_width) != SR_OK)
+	if (select_rate(devc, rate,
+	    rate_divisor_for_mode(devc->acquisition_mode,
+		    enabled_channel_count(sdi))) != SR_OK)
 		return SR_ERR;
 	sr_info("Selected %" PRIu64 " samples/s: %s mode, A3=%02x.",
 		devc->samplerate,
@@ -493,7 +517,7 @@ static int config_list(uint32_t key, GVariant **data,
 		struct dev_context *devc;
 		uint64_t rates[ARRAY_SIZE(rate_table) +
 			ARRAY_SIZE(multichannel_triggered_rate_table)];
-		unsigned int width, n = 0;
+		unsigned int enabled_count, divisor, n = 0;
 		size_t i;
 
 		if (!sdi || !sdi->priv)
@@ -502,8 +526,9 @@ static int config_list(uint32_t key, GVariant **data,
 
 		/* Keep configuration usable while the frontend temporarily has no
 		 * channels selected; acquisition_start still rejects that state. */
-		width = MAX(1U, acquisition_width_for_count(enabled_channel_count(sdi)));
-		if (width == 1) {
+		enabled_count = MAX(1U, enabled_channel_count(sdi));
+		divisor = rate_divisor_for_mode(devc->acquisition_mode, enabled_count);
+		if (divisor == 1) {
 			if (devc->acquisition_mode == H1008C_MODE_TRIGGERED) {
 				for (i = 0;
 				     i < ARRAY_SIZE(multichannel_triggered_rate_table); i++)
@@ -516,16 +541,29 @@ static int config_list(uint32_t key, GVariant **data,
 				}
 			}
 		} else {
-			if (devc->acquisition_mode != H1008C_MODE_TRIGGERED)
+			if (devc->acquisition_mode == H1008C_MODE_ROLL)
 				return SR_ERR_NA;
-			for (i = 0;
-			     i < ARRAY_SIZE(multichannel_triggered_rate_table); i++) {
-				uint64_t effective =
-					multichannel_triggered_rate_table[i].samplerate /
-					width;
+			if (devc->acquisition_mode == H1008C_MODE_SCAN) {
+				for (i = 0; i < ARRAY_SIZE(rate_table); i++) {
+					uint64_t effective;
 
-				if (!n || rates[n - 1] != effective)
-					rates[n++] = effective;
+					if (rate_table[i].mode != H1008C_MODE_SCAN ||
+					    rate_table[i].samplerate < divisor)
+						continue;
+					effective = rate_table[i].samplerate / divisor;
+					if (!n || rates[n - 1] != effective)
+						rates[n++] = effective;
+				}
+			} else {
+				for (i = 0;
+				     i < ARRAY_SIZE(multichannel_triggered_rate_table); i++) {
+					uint64_t effective =
+						multichannel_triggered_rate_table[i].samplerate /
+						divisor;
+
+					if (!n || rates[n - 1] != effective)
+						rates[n++] = effective;
+				}
 			}
 		}
 		*data = std_gvar_samplerates(rates, n);
@@ -568,24 +606,30 @@ static int config_channel_set(const struct sr_dev_inst *sdi,
 		return apply_sample_limit(devc);
 	}
 
-	/* Scan and Roll are currently CH1-only. Moving to a multi-channel width
-	 * therefore selects the fastest valid Triggered rate atomically. */
-	if (devc->acquisition_width > 1 &&
-	    devc->acquisition_mode != H1008C_MODE_TRIGGERED) {
+	/* Roll remains CH1-only. Moving to multiple channels therefore selects the
+	 * fastest valid Triggered rate atomically. Scan supports exact enabled-count
+	 * interleaving and stays selected. */
+	if (devc->enabled_count > 1 &&
+	    devc->acquisition_mode == H1008C_MODE_ROLL) {
 		rate = default_rate_for_mode(H1008C_MODE_TRIGGERED,
 			devc->acquisition_width);
 		sr_info("Channel selection requires Triggered device mode.");
 		return select_rate(devc, rate, devc->acquisition_width);
 	}
 
-	/* Preserve the aggregate Triggered A3 selection across width changes. */
-	rate = find_effective_rate(devc->base_samplerate / devc->acquisition_width,
-		devc->acquisition_width, devc->acquisition_mode);
+	/* Preserve the aggregate A3 selection across channel-count changes. */
+	{
+		unsigned int divisor = rate_divisor_for_mode(devc->acquisition_mode,
+			devc->enabled_count);
+		rate = find_effective_rate(devc->base_samplerate / divisor,
+			divisor, devc->acquisition_mode);
+	}
 	if (!rate)
 		rate = default_rate_for_mode(devc->acquisition_mode,
 			devc->acquisition_width);
 
-	return select_rate(devc, rate, devc->acquisition_width);
+	return select_rate(devc, rate,
+		rate_divisor_for_mode(devc->acquisition_mode, devc->enabled_count));
 }
 
 static int dev_open(struct sr_dev_inst *sdi)
@@ -973,11 +1017,12 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 		return SR_ERR_ARG;
 	}
 	if (devc->enabled_count > 1 &&
-	    devc->acquisition_mode != H1008C_MODE_TRIGGERED) {
-		sr_err("Multi-channel acquisition requires Triggered mode.");
+	    devc->acquisition_mode == H1008C_MODE_ROLL) {
+		sr_err("Multi-channel acquisition is not established for Roll mode.");
 		return SR_ERR_NA;
 	}
-	devc->samplerate = devc->base_samplerate / devc->acquisition_width;
+	devc->samplerate = devc->base_samplerate /
+		rate_divisor_for_mode(devc->acquisition_mode, devc->enabled_count);
 	if (apply_sample_limit(devc) != SR_OK)
 		return SR_ERR;
 

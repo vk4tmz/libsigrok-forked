@@ -833,7 +833,48 @@ Each channel is emitted in volts when its own persisted A2=0x03 calibration is
 available; channels without independently established calibration remain
 explicitly labelled as raw ADC counts.  One channel's calibration is never
 applied to another channel merely to make its trace look plausible.
-ROLL and Scan remain CH1-only pending separate transport validation.
+ROLL remains CH1-only pending separate transport validation.
+
+### Multi-channel Scan geometry (2026-09-05)
+
+An A3=0x1a C9/CA matrix captured contiguous CH1..CHN selections for every
+enabled count from eight back to one. Each two-second run produced approximately
+780--795 aggregate little-endian ADC words/s regardless of channel count. The
+stream deinterleaves across the exact logical enabled count, not Triggered's
+padded `1,2,4,4,6,6,8,8` physical width:
+
+- at eight channels, CH8 alone contained the onboard square-wave span while
+  grounded CH2 and CH5 remained quiet;
+- the seven-, five-, and three-channel streams divided exactly by 7, 5, and 3;
+- applying Triggered's padded widths to those odd counts mixed distinct channel
+  baselines and left incomplete rows.
+
+A following sparse-mask matrix confirmed that enabled samples are packed in
+ascending physical-channel order. `CH1+CH8`, `CH2+CH5`, `CH1+CH5`, `CH5+CH8`,
+`CH1+CH5+CH8`, and `CH1+CH2+CH5+CH8` all divided exactly by their logical
+counts. The 20 Hz sine, grounded-channel baselines, and onboard square wave
+remained attached to the expected physical channels in every combination.
+
+Scan therefore uses `aggregate A3 rate / enabled channel count`. Settings whose
+aggregate rate is below the enabled count are omitted because libsigrok cannot
+represent a positive fractional sample rate. Other non-integral divisions are
+reported using the same integer truncation policy as Triggered mode.
+
+| Enabled channels | Advertised Scan samples/s/channel, slow to fast |
+|---:|---|
+| 1 | 2, 4, 8, 20, 40, 80, 200, 400, 800 |
+| 2 | 1, 2, 4, 10, 20, 40, 100, 200, 400 |
+| 3 | 1, 2, 6, 13, 26, 66, 133, 266 |
+| 4 | 1, 2, 5, 10, 20, 50, 100, 200 |
+| 5 | 1, 4, 8, 16, 40, 80, 160 |
+| 6 | 1, 3, 6, 13, 33, 66, 133 |
+| 7 | 1, 2, 5, 11, 28, 57, 114 |
+| 8 | 1, 2, 5, 10, 25, 50, 100 |
+
+PulseView may now retain Scan while channels are enabled or disabled and
+immediately refreshes this count-dependent list. Roll selection with multiple
+enabled channels remains rejected without changing the active Trigger or Scan
+configuration.
 
 ### PulseView end-to-end validation (2026-09-05)
 

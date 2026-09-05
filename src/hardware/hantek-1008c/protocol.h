@@ -74,7 +74,7 @@ struct dev_context {
 	gboolean triggered_armed;
 	gboolean triggered_forced;
 	gint64 triggered_arm_us;
-	uint8_t scan_carry[4];
+	uint8_t scan_carry[2 * H1008C_NUM_HW_CHANNELS];
 	size_t scan_carry_len;
 };
 

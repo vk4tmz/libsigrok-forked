@@ -657,10 +657,10 @@ SR_PRIV int h1008c_read_scan(const struct sr_dev_inst *sdi,
 	static const uint8_t ca[] = { 0xca };
 	struct dev_context *devc = sdi->priv;
 	uint8_t rx[H1008C_USB_PACKET];
-	uint8_t framed[4 + H1008C_USB_PACKET];
+	uint8_t framed[2 * H1008C_NUM_HW_CHANNELS + H1008C_USB_PACKET];
 	float *out;
 	uint16_t available;
-	size_t total, complete, rows, i;
+	size_t total, complete, row_bytes, rows, words, i;
 	int actual;
 
 	*samples = NULL;
@@ -706,33 +706,34 @@ SR_PRIV int h1008c_read_scan(const struct sr_dev_inst *sdi,
 	memcpy(framed, devc->scan_carry, devc->scan_carry_len);
 	memcpy(framed + devc->scan_carry_len, rx, available);
 	total = devc->scan_carry_len + available;
-	complete = total - (total % 4);
+	if (!devc->enabled_count)
+		return SR_ERR;
+	row_bytes = 2 * devc->enabled_count;
+	complete = total - (total % row_bytes);
 	devc->scan_carry_len = total - complete;
 	if (devc->scan_carry_len)
 		memcpy(devc->scan_carry, framed + complete, devc->scan_carry_len);
 	if (!complete)
 		return SR_OK;
 
-	rows = complete / 4;
-	out = g_try_new(float, rows * 2);
+	rows = complete / row_bytes;
+	words = complete / 2;
+	out = g_try_new(float, words);
 	if (!out)
 		return SR_ERR_MALLOC;
 
 	/*
-	 * Grounded-input, cross-rate 20 Hz adjacency, and reference-tone timing
-	 * validation establish the C9/CA Scan temporal order as
-	 * word0[n], word1[n], word0[n+1], word1[n+1], ... .  Decode only that
-	 * structural ordering; do not filter, average, interpolate, or otherwise
-	 * modify acquired values.
+	 * A3=1A captures with one through eight enabled channels establish a stream
+	 * of little-endian ADC words interleaved across exactly the enabled channel
+	 * count. Unlike Triggered mode, odd Scan counts have no dummy lane. Decode
+	 * only that structural ordering; do not filter, average, interpolate, or
+	 * otherwise modify acquired values.
 	 */
-	for (i = 0; i < rows; i++) {
-		out[i * 2] = (float)(((uint16_t)framed[i * 4] |
-			((uint16_t)framed[i * 4 + 1] << 8)) & 0x0fff);
-		out[i * 2 + 1] = (float)(((uint16_t)framed[i * 4 + 2] |
-			((uint16_t)framed[i * 4 + 3] << 8)) & 0x0fff);
-	}
+	for (i = 0; i < words; i++)
+		out[i] = (float)(((uint16_t)framed[i * 2] |
+			((uint16_t)framed[i * 2 + 1] << 8)) & 0x0fff);
 
 	*samples = out;
-	*sample_count = rows * 2;
+	*sample_count = rows;
 	return SR_OK;
 }
