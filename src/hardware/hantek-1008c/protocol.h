@@ -98,6 +98,10 @@ SR_PRIV int h1008c_rate_get(enum h1008c_acquisition_mode mode,
 SR_PRIV const struct h1008c_rate *h1008c_find_effective_rate(
 		uint64_t samplerate, unsigned int divisor,
 		enum h1008c_acquisition_mode mode);
+SR_PRIV int h1008c_decode_stream_rows(const uint8_t *input, size_t input_len,
+		unsigned int enabled_count, unsigned int trailing_words,
+		uint8_t *carry, size_t *carry_len, size_t carry_capacity,
+		float **samples, size_t *row_count);
 
 SR_PRIV int h1008c_open(struct sr_dev_inst *sdi);
 SR_PRIV int h1008c_close(struct sr_dev_inst *sdi);

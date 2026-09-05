@@ -539,6 +539,63 @@ SR_PRIV int h1008c_start_roll(const struct sr_dev_inst *sdi, uint8_t a3_id)
 	return SR_OK;
 }
 
+SR_PRIV int h1008c_decode_stream_rows(const uint8_t *input, size_t input_len,
+		unsigned int enabled_count, unsigned int trailing_words,
+		uint8_t *carry, size_t *carry_len, size_t carry_capacity,
+		float **samples, size_t *row_count)
+{
+	uint8_t *framed;
+	float *out;
+	size_t total, complete, row_bytes, rows, row, lane;
+
+	if (!carry || !carry_len || !samples || !row_count ||
+		(!input && input_len) || !enabled_count)
+		return SR_ERR_ARG;
+	*samples = NULL;
+	*row_count = 0;
+	row_bytes = 2 * (enabled_count + trailing_words);
+	if (!row_bytes || *carry_len >= row_bytes ||
+		carry_capacity < row_bytes - 1 || *carry_len > carry_capacity)
+		return SR_ERR_ARG;
+
+	total = *carry_len + input_len;
+	if (!total)
+		return SR_OK;
+	framed = g_try_malloc(total);
+	if (!framed)
+		return SR_ERR_MALLOC;
+	memcpy(framed, carry, *carry_len);
+	memcpy(framed + *carry_len, input, input_len);
+	complete = total - total % row_bytes;
+	*carry_len = total - complete;
+	if (*carry_len)
+		memcpy(carry, framed + complete, *carry_len);
+	if (!complete) {
+		g_free(framed);
+		return SR_OK;
+	}
+
+	rows = complete / row_bytes;
+	out = g_try_new(float, rows * enabled_count);
+	if (!out) {
+		g_free(framed);
+		return SR_ERR_MALLOC;
+	}
+	for (row = 0; row < rows; row++) {
+		for (lane = 0; lane < enabled_count; lane++) {
+			size_t offset = row * row_bytes + lane * 2;
+
+			out[row * enabled_count + lane] =
+				(float)(((uint16_t)framed[offset] |
+				((uint16_t)framed[offset + 1] << 8)) & 0x0fff);
+		}
+	}
+	g_free(framed);
+	*samples = out;
+	*row_count = rows;
+	return SR_OK;
+}
+
 SR_PRIV int h1008c_read_roll(const struct sr_dev_inst *sdi,
 		float **samples, size_t *sample_count)
 {
@@ -546,10 +603,10 @@ SR_PRIV int h1008c_read_roll(const struct sr_dev_inst *sdi,
 	static const uint8_t c7[] = { 0xc7 };
 	static const uint8_t c8[] = { 0xc8 };
 	struct dev_context *devc = sdi->priv;
-	uint8_t rx[H1008C_USB_PACKET], *raw, *framed;
+	uint8_t rx[H1008C_USB_PACKET], *raw;
 	float *out;
 	uint16_t ready_len;
-	size_t done, total, complete, row_bytes, rows, i, lane;
+	size_t done, rows;
 	int actual;
 
 	*samples = NULL;
@@ -587,45 +644,12 @@ SR_PRIV int h1008c_read_roll(const struct sr_dev_inst *sdi,
 		done += MIN((size_t)actual, (size_t)ready_len - done);
 	}
 
-	if (!devc->enabled_count) {
-		g_free(raw);
-		return SR_ERR;
-	}
-	row_bytes = 2 * (devc->enabled_count + 1);
-	total = devc->roll_carry_len + ready_len;
-	framed = g_try_malloc(total);
-	if (!framed) {
-		g_free(raw);
-		return SR_ERR_MALLOC;
-	}
-	memcpy(framed, devc->roll_carry, devc->roll_carry_len);
-	memcpy(framed + devc->roll_carry_len, raw, ready_len);
+	actual = h1008c_decode_stream_rows(raw, ready_len,
+		devc->enabled_count, 1, devc->roll_carry,
+		&devc->roll_carry_len, sizeof(devc->roll_carry), &out, &rows);
 	g_free(raw);
-	complete = total - total % row_bytes;
-	devc->roll_carry_len = total - complete;
-	if (devc->roll_carry_len)
-		memcpy(devc->roll_carry, framed + complete, devc->roll_carry_len);
-	if (!complete) {
-		g_free(framed);
-		return SR_OK;
-	}
-
-	rows = complete / row_bytes;
-	out = g_try_new(float, rows * devc->enabled_count);
-	if (!out) {
-		g_free(framed);
-		return SR_ERR_MALLOC;
-	}
-	for (i = 0; i < rows; i++) {
-		for (lane = 0; lane < devc->enabled_count; lane++) {
-			size_t offset = i * row_bytes + lane * 2;
-
-			out[i * devc->enabled_count + lane] =
-				(float)(((uint16_t)framed[offset] |
-				((uint16_t)framed[offset + 1] << 8)) & 0x0fff);
-		}
-	}
-	g_free(framed);
+	if (actual != SR_OK)
+		return actual;
 
 	*samples = out;
 	*sample_count = rows;
@@ -686,10 +710,9 @@ SR_PRIV int h1008c_read_scan(const struct sr_dev_inst *sdi,
 	static const uint8_t ca[] = { 0xca };
 	struct dev_context *devc = sdi->priv;
 	uint8_t rx[H1008C_USB_PACKET];
-	uint8_t framed[2 * H1008C_NUM_HW_CHANNELS + H1008C_USB_PACKET];
 	float *out;
 	uint16_t available;
-	size_t total, complete, row_bytes, rows, words, i;
+	size_t rows;
 	int actual;
 
 	*samples = NULL;
@@ -732,25 +755,6 @@ SR_PRIV int h1008c_read_scan(const struct sr_dev_inst *sdi,
 		return SR_OK;
 	}
 
-	memcpy(framed, devc->scan_carry, devc->scan_carry_len);
-	memcpy(framed + devc->scan_carry_len, rx, available);
-	total = devc->scan_carry_len + available;
-	if (!devc->enabled_count)
-		return SR_ERR;
-	row_bytes = 2 * devc->enabled_count;
-	complete = total - (total % row_bytes);
-	devc->scan_carry_len = total - complete;
-	if (devc->scan_carry_len)
-		memcpy(devc->scan_carry, framed + complete, devc->scan_carry_len);
-	if (!complete)
-		return SR_OK;
-
-	rows = complete / row_bytes;
-	words = complete / 2;
-	out = g_try_new(float, words);
-	if (!out)
-		return SR_ERR_MALLOC;
-
 	/*
 	 * A3=1A captures with one through eight enabled channels establish a stream
 	 * of little-endian ADC words interleaved across exactly the enabled channel
@@ -758,9 +762,11 @@ SR_PRIV int h1008c_read_scan(const struct sr_dev_inst *sdi,
 	 * only that structural ordering; do not filter, average, interpolate, or
 	 * otherwise modify acquired values.
 	 */
-	for (i = 0; i < words; i++)
-		out[i] = (float)(((uint16_t)framed[i * 2] |
-			((uint16_t)framed[i * 2 + 1] << 8)) & 0x0fff);
+	actual = h1008c_decode_stream_rows(rx, available,
+		devc->enabled_count, 0, devc->scan_carry,
+		&devc->scan_carry_len, sizeof(devc->scan_carry), &out, &rows);
+	if (actual != SR_OK)
+		return actual;
 
 	*samples = out;
 	*sample_count = rows;

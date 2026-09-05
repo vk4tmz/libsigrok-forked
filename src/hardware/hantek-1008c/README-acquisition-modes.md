@@ -891,6 +891,12 @@ effective per-channel rate selection for one through eight channels, invalid
 rate rejection, and the Narrow/Medium/Wide range mapping. These model tests do
 not open or require a USB device.
 
+The same test executable feeds synthetic byte streams through the production
+Scan/Roll row decoder. It verifies rows split at arbitrary byte boundaries,
+multiple logical rows per read, preserved sparse-lane ordering, 12-bit masking,
+and removal of Roll's trailing AUX word. This structural test path performs no
+waveform-dependent processing.
+
 ### Multi-channel Scan geometry (2026-09-05)
 
 An A3=0x1a C9/CA matrix captured contiguous CH1..CHN selections for every

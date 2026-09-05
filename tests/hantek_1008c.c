@@ -33,6 +33,99 @@ START_TEST(test_acquisition_geometry)
 }
 END_TEST
 
+static void put_word(uint8_t *dest, uint16_t value)
+{
+	dest[0] = value & 0xff;
+	dest[1] = value >> 8;
+}
+
+START_TEST(test_scan_fragmented_rows)
+{
+	uint8_t raw[12], carry[16] = { 0 };
+	float *samples;
+	size_t carry_len = 0, rows;
+	int ret;
+
+	put_word(raw + 0, 0x0065);  /* sparse lane CH1 identity: 101 */
+	put_word(raw + 2, 0x01f9);  /* sparse lane CH5 identity: 505 */
+	put_word(raw + 4, 0x0328);  /* sparse lane CH8 identity: 808 */
+	put_word(raw + 6, 0xf066);  /* upper bits must be masked */
+	put_word(raw + 8, 0x01fa);
+	put_word(raw + 10, 0x0329);
+
+	ret = h1008c_decode_stream_rows(raw, 5, 3, 0,
+		carry, &carry_len, sizeof(carry), &samples, &rows);
+	ck_assert_int_eq(ret, SR_OK);
+	ck_assert_ptr_null(samples);
+	ck_assert_uint_eq(rows, 0);
+	ck_assert_uint_eq(carry_len, 5);
+
+	ret = h1008c_decode_stream_rows(raw + 5, sizeof(raw) - 5, 3, 0,
+		carry, &carry_len, sizeof(carry), &samples, &rows);
+	ck_assert_int_eq(ret, SR_OK);
+	ck_assert_uint_eq(rows, 2);
+	ck_assert_uint_eq(carry_len, 0);
+	ck_assert_float_eq(samples[0], 101.0f);
+	ck_assert_float_eq(samples[1], 505.0f);
+	ck_assert_float_eq(samples[2], 808.0f);
+	ck_assert_float_eq(samples[3], 102.0f);
+	ck_assert_float_eq(samples[4], 506.0f);
+	ck_assert_float_eq(samples[5], 809.0f);
+	g_free(samples);
+}
+END_TEST
+
+START_TEST(test_roll_aux_removed_across_fragments)
+{
+	uint8_t raw[16], carry[18] = { 0 };
+	float *samples;
+	size_t carry_len = 0, rows;
+	int ret;
+
+	put_word(raw + 0, 101);
+	put_word(raw + 2, 505);
+	put_word(raw + 4, 808);
+	put_word(raw + 6, 1720);  /* AUX */
+	put_word(raw + 8, 102);
+	put_word(raw + 10, 506);
+	put_word(raw + 12, 809);
+	put_word(raw + 14, 1721); /* AUX */
+
+	ret = h1008c_decode_stream_rows(raw, 11, 3, 1,
+		carry, &carry_len, sizeof(carry), &samples, &rows);
+	ck_assert_int_eq(ret, SR_OK);
+	ck_assert_uint_eq(rows, 1);
+	ck_assert_uint_eq(carry_len, 3);
+	ck_assert_float_eq(samples[0], 101.0f);
+	ck_assert_float_eq(samples[1], 505.0f);
+	ck_assert_float_eq(samples[2], 808.0f);
+	g_free(samples);
+
+	ret = h1008c_decode_stream_rows(raw + 11, sizeof(raw) - 11, 3, 1,
+		carry, &carry_len, sizeof(carry), &samples, &rows);
+	ck_assert_int_eq(ret, SR_OK);
+	ck_assert_uint_eq(rows, 1);
+	ck_assert_uint_eq(carry_len, 0);
+	ck_assert_float_eq(samples[0], 102.0f);
+	ck_assert_float_eq(samples[1], 506.0f);
+	ck_assert_float_eq(samples[2], 809.0f);
+	g_free(samples);
+}
+END_TEST
+
+START_TEST(test_stream_row_argument_guards)
+{
+	uint8_t raw[2] = { 0 }, carry[2] = { 0 };
+	float *samples;
+	size_t carry_len = 0, rows;
+
+	ck_assert_int_eq(h1008c_decode_stream_rows(raw, sizeof(raw), 0, 0,
+		carry, &carry_len, sizeof(carry), &samples, &rows), SR_ERR_ARG);
+	ck_assert_int_eq(h1008c_decode_stream_rows(raw, sizeof(raw), 2, 0,
+		carry, &carry_len, sizeof(carry), &samples, &rows), SR_ERR_ARG);
+}
+END_TEST
+
 START_TEST(test_range_names)
 {
 	ck_assert_str_eq(h1008c_range_name(1), "Narrow");
@@ -122,6 +215,9 @@ int main(void)
 	tcase_add_test(tc, test_acquisition_geometry);
 	tcase_add_test(tc, test_range_names);
 	tcase_add_test(tc, test_validated_rate_tables);
+	tcase_add_test(tc, test_scan_fragmented_rows);
+	tcase_add_test(tc, test_roll_aux_removed_across_fragments);
+	tcase_add_test(tc, test_stream_row_argument_guards);
 	suite_add_tcase(suite, tc);
 	runner = srunner_create(suite);
 	srunner_run_all(runner, CK_VERBOSE);
