@@ -827,6 +827,8 @@ CLEAN_EXTRA += version-clean
 pkgconfigdir = $(libdir)/pkgconfig
 pkgconfig_DATA = libsigrok.pc
 
+dist_bin_SCRIPTS = contrib/sigrok-hantek-1008c-calibrate
+
 mimeappdir = $(datadir)/mime/packages
 mimeapp_DATA = contrib/vnd.sigrok.session.xml
 
@@ -867,7 +869,6 @@ EXTRA_DIST = \
 	contrib/60-libsigrok.rules \
 	contrib/61-libsigrok-plugdev.rules \
 	contrib/61-libsigrok-uaccess.rules \
-	contrib/hantek-1008c-calibrate.py \
 	src/minilzo/COPYING \
 	src/minilzo/Makefile \
 	src/minilzo/README.LZO \

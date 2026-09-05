@@ -846,7 +846,7 @@ retain both the meaningful name and raw A2 value.
 
 ### Standalone sigrok-cli calibration utility
 
-`contrib/hantek-1008c-calibrate.py` calibrates the production driver without
+`sigrok-hantek-1008c-calibrate` calibrates the production driver without
 checking out or importing the companion Python protocol-laboratory project.
 It invokes the installed `sigrok-cli`, captures raw ADC counts under a temporary
 empty `XDG_DATA_HOME`, and atomically updates
@@ -855,7 +855,7 @@ empty `XDG_DATA_HOME`, and atomically updates
 Close PulseView and any other process using the scope, then run:
 
 ```
-python3 contrib/hantek-1008c-calibrate.py
+sigrok-hantek-1008c-calibrate
 ```
 
 The default run covers CH1 through CH8 and Narrow, Medium, and Wide. For each channel
@@ -865,7 +865,7 @@ consecutively. A2=01 is grounded-zero only because the onboard reference
 overranges that frontend state. Subsets can be selected, for example:
 
 ```
-python3 contrib/hantek-1008c-calibrate.py --channels 3,4 --ranges Medium,Wide
+sigrok-hantek-1008c-calibrate --channels 3,4 --ranges Medium,Wide
 ```
 
 Each capture retries complete `sigrok-cli` acquisitions for up to 15 seconds
@@ -879,7 +879,7 @@ the saved zero offset or nominal volts-per-count scale.
 The utility's parser and measurement checks can be exercised without hardware:
 
 ```
-python3 contrib/hantek-1008c-calibrate.py --self-test
+sigrok-hantek-1008c-calibrate --self-test
 ```
 
 ### Multi-channel Scan geometry (2026-09-05)
