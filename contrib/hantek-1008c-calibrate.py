@@ -75,27 +75,33 @@ def parse_ranges(text):
 
 
 def parse_capture(stdout, channel):
-    values = []
-    in_frame = False
-    saw_frame = False
+    frames = []
+    current = None
     for line in stdout.splitlines():
         line = line.strip()
         if line == "FRAME-BEGIN":
-            in_frame = True
-            saw_frame = True
+            if current is not None:
+                raise CalibrationError("nested frame in sigrok-cli output")
+            current = []
             continue
         if line == "FRAME-END":
-            in_frame = False
+            if current is None:
+                raise CalibrationError("frame end without frame begin")
+            frames.append(current)
+            current = None
             continue
         match = SAMPLE_RE.match(line)
-        if match and in_frame and int(match.group(1)) == channel:
-            values.append(float(match.group(2)))
-    if not saw_frame:
+        if match and current is not None and int(match.group(1)) == channel:
+            current.append(float(match.group(2)))
+    if current is not None:
+        raise CalibrationError("unterminated frame in sigrok-cli output")
+    if not frames:
         raise CalibrationError("sigrok-cli output contained no frame")
+    values = [value for frame in frames for value in frame]
     if len(values) != SAMPLES:
         raise CalibrationError(
             f"expected {SAMPLES} raw samples for CH{channel}, received {len(values)}")
-    return values
+    return frames
 
 
 def percentile(sorted_values, fraction):
@@ -108,25 +114,51 @@ def percentile(sorted_values, fraction):
             sorted_values[upper] * (position - lower))
 
 
-def reference_metrics(values, scale):
+def reference_metrics(frames, scale):
+    values = [value for frame in frames for value in frame]
     ordered = sorted(values)
     low = percentile(ordered, 0.10)
     high = percentile(ordered, 0.90)
     vpp = (high - low) * scale
     lower_threshold = low + 0.25 * (high - low)
     upper_threshold = low + 0.75 * (high - low)
-    armed = values[0] <= lower_threshold
-    crossings = []
-    for index, value in enumerate(values[1:], 1):
-        if value <= lower_threshold:
-            armed = True
-        elif armed and value >= upper_threshold:
-            crossings.append(index)
-            armed = False
-    if len(crossings) < 2:
-        raise CalibrationError("reference waveform has fewer than two rising crossings")
-    periods = [b - a for a, b in zip(crossings, crossings[1:])]
-    frequency = SAMPLERATE / statistics.median(periods)
+    high_durations = []
+    low_durations = []
+    for frame in frames:
+        if not frame:
+            continue
+        if frame[0] <= lower_threshold:
+            state = "low"
+        elif frame[0] >= upper_threshold:
+            state = "high"
+        else:
+            state = None
+        last_transition = None
+        for index, value in enumerate(frame[1:], 1):
+            new_state = state
+            if value <= lower_threshold:
+                new_state = "low"
+            elif value >= upper_threshold:
+                new_state = "high"
+            if state is None:
+                state = new_state
+                continue
+            if new_state == state:
+                continue
+            if last_transition is not None:
+                duration = index - last_transition
+                if state == "high":
+                    high_durations.append(duration)
+                else:
+                    low_durations.append(duration)
+            state = new_state
+            last_transition = index
+    if not high_durations or not low_durations:
+        raise CalibrationError(
+            "reference waveform has insufficient same-frame high/low durations")
+    period = (statistics.median(high_durations) +
+              statistics.median(low_durations))
+    frequency = SAMPLERATE / period
     return vpp, frequency
 
 
@@ -305,8 +337,9 @@ def run(args):
             for range_id in args.ranges:
                 print(f"\n--- CH{channel} grounded zero, "
                       f"{RANGE_NAMES[range_id]} (A2={range_id:02X}) ---\n")
-                values, observed_connection = capture_with_retry(
+                frames, observed_connection = capture_with_retry(
                     sigrok_cli, channel, range_id, raw_home)
+                values = [value for frame in frames for value in frame]
                 if connection and observed_connection != connection:
                     raise CalibrationError("USB connection path changed during calibration")
                 connection = observed_connection
@@ -330,11 +363,12 @@ def run(args):
                 for range_id in reference_ranges:
                     print(f"\n--- CH{channel} reference validation, "
                           f"{RANGE_NAMES[range_id]} (A2={range_id:02X}) ---\n")
-                    values, observed_connection = capture_with_retry(
+                    frames, observed_connection = capture_with_retry(
                         sigrok_cli, channel, range_id, raw_home)
                     if observed_connection != connection:
                         raise CalibrationError("USB connection path changed during calibration")
-                    vpp, frequency = reference_metrics(values, NOMINAL_SCALE[range_id])
+                    vpp, frequency = reference_metrics(
+                        frames, NOMINAL_SCALE[range_id])
                     passed = save_validation(config, store, connection, channel,
                                              range_id, vpp, frequency)
                     print("  Reference result")
@@ -351,13 +385,22 @@ def run(args):
 
 
 def self_test():
-    lines = ["META samplerate: 2400000", "FRAME-BEGIN"]
-    lines.extend(f"CH2: {2000 + (i % 2)} pcs" for i in range(SAMPLES))
-    lines.append("FRAME-END")
-    assert len(parse_capture("\n".join(lines), 2)) == SAMPLES
-    wave = [2000 + (100 if math.sin(2 * math.pi * 1000 * i / SAMPLERATE) >= 0 else -100)
-            for i in range(SAMPLES)]
-    vpp, frequency = reference_metrics(wave, 0.01)
+    lines = ["META samplerate: 2400000"]
+    for frame_number in range(3):
+        lines.append("FRAME-BEGIN")
+        lines.extend(f"CH2: {2000 + ((i + frame_number) % 2)} pcs"
+                     for i in range(4000))
+        lines.append("FRAME-END")
+    frames = parse_capture("\n".join(lines), 2)
+    assert list(map(len, frames)) == [4000, 4000, 4000]
+    wave_frames = []
+    for phase in (0, 700, 1700):
+        wave_frames.append([
+            2000 + (100 if math.sin(
+                2 * math.pi * 1000 * (i + phase) / SAMPLERATE) >= 0 else -100)
+            for i in range(4000)
+        ])
+    vpp, frequency = reference_metrics(wave_frames, 0.01)
     assert abs(vpp - 2.0) < 1e-9 and abs(frequency - 1000.0) < 1.0
     assert connection_id("USB connection active at 1.94 (usb/1-1.1).") == "usb/1-1.1"
     print("Self-test: PASS")
