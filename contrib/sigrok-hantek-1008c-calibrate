@@ -29,6 +29,10 @@ RANGE_ALIASES = {
     "a2=01": 1, "a2=02": 2, "a2=03": 3,
 }
 REFERENCE_RANGES = {2, 3}
+ADC_MAX = 4095
+FIRST_ZERO_MIN = 0.45 * ADC_MAX
+FIRST_ZERO_MAX = 0.55 * ADC_MAX
+DEFAULT_MAX_ZERO_SHIFT_COUNTS = 20.0
 SAMPLE_RE = re.compile(r"^CH(\d+):\s+([-+]?\d+(?:\.\d+)?)\s+pcs$")
 CONNECTION_RE = re.compile(r"\((usb/[^)]+)\)")
 
@@ -72,6 +76,16 @@ def parse_ranges(text):
     if not result:
         raise argparse.ArgumentTypeError("at least one range is required")
     return result
+
+
+def positive_finite(value):
+    try:
+        number = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("value must be a number") from exc
+    if not math.isfinite(number) or number <= 0:
+        raise argparse.ArgumentTypeError("value must be finite and > 0")
+    return number
 
 
 def parse_capture(stdout, channel):
@@ -260,20 +274,86 @@ def section_name(connection, channel, range_id):
     return f"device {connection} channel CH{channel} range {range_id:02X}"
 
 
+def policy_section_name(connection):
+    return f"calibration policy {connection}"
+
+
+def resolve_zero_shift_policy(config, connection, command_line_value):
+    if command_line_value is not None:
+        return command_line_value, "command line"
+    section = policy_section_name(connection)
+    if not config.has_option(section, "max_zero_shift_counts"):
+        return DEFAULT_MAX_ZERO_SHIFT_COUNTS, "default"
+    value = config.getfloat(section, "max_zero_shift_counts")
+    if not math.isfinite(value) or value <= 0:
+        raise CalibrationError(
+            f"invalid max_zero_shift_counts in [{section}]")
+    return value, "saved device policy"
+
+
+def validate_zero_candidate(candidate, previous, limit):
+    if not FIRST_ZERO_MIN <= candidate <= FIRST_ZERO_MAX:
+        raise CalibrationError(
+            f"candidate zero {candidate:.3f} is outside the plausible "
+            f"{FIRST_ZERO_MIN:.0f}..{FIRST_ZERO_MAX:.0f} count region")
+    if previous is None:
+        return None
+    shift = candidate - previous
+    if abs(shift) > limit:
+        raise CalibrationError(
+            f"candidate zero shift {shift:+.3f} counts exceeds "
+            f"the permitted +/-{limit:.3f} counts")
+    return shift
+
+
 def utc_now():
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
 
 
-def save_zero(config, path, connection, channel, range_id, values):
+def save_zero(config, path, connection, channel, range_id, values,
+              command_line_max_shift):
     section = section_name(connection, channel, range_id)
-    if not config.has_section(section):
-        config.add_section(section)
     mean = statistics.fmean(values)
     stddev = statistics.pstdev(values)
     span = max(values) - min(values)
     if stddev > 5.0 or span > 32:
         raise CalibrationError(
             f"ground capture is too noisy (stddev={stddev:.3f}, span={span:.0f})")
+    print("  Grounded-zero result")
+    print(f"    - Mean: {mean:.3f} counts")
+    print(f"    - Standard deviation: {stddev:.3f} counts")
+    print(f"    - Minimum: {min(values):.0f} counts")
+    print(f"    - Maximum: {max(values):.0f} counts")
+    print(f"    - Span: {span:.0f} counts")
+    print(f"    - Samples: {len(values)}\n")
+    previous = None
+    if config.has_option(section, "zero_adc"):
+        previous = config.getfloat(section, "zero_adc")
+        if not math.isfinite(previous):
+            raise CalibrationError(f"invalid existing zero_adc in [{section}]")
+    limit, policy_source = resolve_zero_shift_policy(
+        config, connection, command_line_max_shift)
+
+    print("  Zero-calibration safeguard")
+    if previous is None:
+        print("    - Existing zero: none (first calibration for this entry)")
+    else:
+        print(f"    - Existing zero: {previous:.3f} counts")
+    print(f"    - Candidate zero: {mean:.3f} counts")
+    print(f"    - Maximum permitted shift: +/-{limit:g} counts")
+    print(f"    - Policy source: {policy_source}")
+    try:
+        shift = validate_zero_candidate(mean, previous, limit)
+    except CalibrationError:
+        print("    - Result: REJECTED")
+        print("    - Existing calibration and saved policy were not modified")
+        raise
+    if shift is not None:
+        print(f"    - Change: {shift:+.3f} counts")
+    print("    - Result: PASS")
+
+    if not config.has_section(section):
+        config.add_section(section)
     fields = {
         "usb_vid": VID, "usb_pid": PID, "connection_id": connection,
         "channel": f"CH{channel}", "range_a2": f"{range_id:02X}",
@@ -285,6 +365,13 @@ def save_zero(config, path, connection, channel, range_id, values):
     }
     for key, value in fields.items():
         config.set(section, key, value)
+    if command_line_max_shift is not None:
+        policy_section = policy_section_name(connection)
+        if not config.has_section(policy_section):
+            config.add_section(policy_section)
+        config.set(policy_section, "max_zero_shift_counts", f"{limit:.9g}")
+        config.set(policy_section, "updated_utc", utc_now())
+        print(f"    - Saved device policy: +/-{limit:g} counts")
     save_store(config, path)
     return mean, stddev, span
 
@@ -321,6 +408,9 @@ def run(args):
     print(f"  - sigrok-cli: {sigrok_cli}")
     print(f"  - Store: {store}")
     print("  - Close PulseView and other programs using the oscilloscope.\n")
+    print("Connection rule")
+    print("  - During a grounded capture, disconnect or ground every other input.")
+    print("  - Never leave the onboard reference connected to another channel.\n")
     with tempfile.TemporaryDirectory(prefix="hantek-raw-calibration-") as temp:
         raw_home = pathlib.Path(temp)
         for position, channel in enumerate(args.channels, 1):
@@ -328,8 +418,10 @@ def run(args):
             print(f"Channel {position}/{len(args.channels)}")
             print(f"  - Channel: CH{channel}\n")
             print("[Connection 1: grounded]")
-            print(f"  Connect the CH{channel} probe input to scope ground.")
-            print("  These ranges will run without another cable move: " +
+            print(f"  - Connect the CH{channel} probe input to scope ground.")
+            print("  - Disconnect or ground every other scope input.")
+            print("  - Do not leave the onboard reference connected to another channel.")
+            print("  - These ranges will run without another cable move: " +
                   ", ".join(f"{RANGE_NAMES[value]} (A2={value:02X})"
                             for value in args.ranges))
             prompt(f"\nPress Enter when CH{channel} is grounded, or Ctrl-C to stop... ")
@@ -344,18 +436,14 @@ def run(args):
                     raise CalibrationError("USB connection path changed during calibration")
                 connection = observed_connection
                 mean, stddev, span = save_zero(
-                    config, store, connection, channel, range_id, values)
-                print("  Grounded-zero result")
-                print(f"    - Mean: {mean:.3f} counts")
-                print(f"    - Standard deviation: {stddev:.3f} counts")
-                print(f"    - Minimum: {min(values):.0f} counts")
-                print(f"    - Maximum: {max(values):.0f} counts")
-                print(f"    - Span: {span:.0f} counts")
-                print(f"    - Samples: {len(values)}")
+                    config, store, connection, channel, range_id, values,
+                    args.max_zero_shift_counts)
                 print(f"    - Saved: {store}")
             if reference_ranges:
                 print("\n[Connection 2: onboard reference]")
                 print(f"  Move the CH{channel} probe to the onboard 1 kHz / 2 Vp-p output.")
+                print("  Connect the reference only to this target channel.")
+                print("  Disconnect or ground every other scope input.")
                 print("  These ranges will run without another cable move: " +
                       ", ".join(f"{RANGE_NAMES[value]} (A2={value:02X})"
                                 for value in reference_ranges))
@@ -403,6 +491,17 @@ def self_test():
     vpp, frequency = reference_metrics(wave_frames, 0.01)
     assert abs(vpp - 2.0) < 1e-9 and abs(frequency - 1000.0) < 1.0
     assert connection_id("USB connection active at 1.94 (usb/1-1.1).") == "usb/1-1.1"
+    assert validate_zero_candidate(2015.0, None, 20.0) is None
+    assert validate_zero_candidate(2029.0, 2015.0, 20.0) == 14.0
+    try:
+        validate_zero_candidate(1969.0, 2015.0, 20.0)
+    except CalibrationError:
+        pass
+    else:
+        raise AssertionError("an anomalous zero shift was accepted")
+    assert validate_zero_candidate(1969.0, 2015.0, 50.0) == -46.0
+    policy_config = load_store(pathlib.Path("/does/not/exist"))
+    assert resolve_zero_shift_policy(policy_config, "usb/1-1.1", None) == (20.0, "default")
     print("Self-test: PASS")
 
 
@@ -417,6 +516,11 @@ def main():
         os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share")),
         "hantek-1008c", "calibration.ini"))
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument(
+        "--max-zero-shift-counts", type=positive_finite,
+        help=("maximum permitted change from an existing zero calibration; "
+              "a successful grounded calibration persists this device policy "
+              "(default: saved policy or 20 counts)"))
     args = parser.parse_args()
     if args.self_test:
         self_test()

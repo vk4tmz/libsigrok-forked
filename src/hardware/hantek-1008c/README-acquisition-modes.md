@@ -868,6 +868,29 @@ overranges that frontend state. Subsets can be selected, for example:
 sigrok-hantek-1008c-calibrate --channels 3,4 --ranges Medium,Wide
 ```
 
+Input isolation is mandatory during calibration. For grounded capture, ground
+the target and disconnect or ground all other inputs; never leave the onboard
+reference connected to another channel. For reference validation, connect the
+reference only to the target and disconnect or ground every other input. Tests
+with the reference left on CH2 and CH8 both produced excessive noise on grounded
+CH1 and were rejected by the noise-quality check.
+
+Grounded-zero replacement has a safety check. A first value must fall within
+the central 45–55% of the 12-bit ADC range (approximately 1843–2252 counts),
+and an existing per-device/channel/range value may move by at most 20 counts by
+default. A different positive limit can be selected with, for example:
+
+```sh
+sigrok-hantek-1008c-calibrate --max-zero-shift-counts 50
+```
+
+After a successful grounded capture, an explicitly supplied limit is stored
+under `[calibration policy <USB connection>]` in the calibration file. Later
+runs without the option reuse that device policy. A rejected capture changes
+neither the existing calibration nor the saved policy. The utility logs the
+existing value, candidate value, signed change, permitted limit, policy source,
+and acceptance result.
+
 Each capture retries complete `sigrok-cli` acquisitions for up to 15 seconds
 at 500 ms intervals after transient USB disappearance, timeout, or malformed
 capture output. Recovery entry, each failed attempt, success, elapsed time, and
