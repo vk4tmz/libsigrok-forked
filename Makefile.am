@@ -867,6 +867,7 @@ EXTRA_DIST = \
 	contrib/60-libsigrok.rules \
 	contrib/61-libsigrok-plugdev.rules \
 	contrib/61-libsigrok-uaccess.rules \
+	contrib/hantek-1008c-calibrate.py \
 	src/minilzo/COPYING \
 	src/minilzo/Makefile \
 	src/minilzo/README.LZO \
@@ -1151,4 +1152,3 @@ dist-changelog:
 	else \
 		rm -f .ChangeLog.tmp; exit 1; \
 	fi
-

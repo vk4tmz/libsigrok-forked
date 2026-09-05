@@ -829,11 +829,58 @@ Configuration and unsupported-mode errors remain immediate failures.
 Multi-channel frames are emitted as one analogue packet per enabled channel.
 This is required because a sigrok analogue packet has one shared meaning and
 encoding, while Hantek voltage calibration is per device, channel, and range.
-Each channel is emitted in volts when its own persisted A2=0x03 calibration is
+Each channel is emitted in volts when its own persisted calibration for the
+selected A2 range is
 available; channels without independently established calibration remain
 explicitly labelled as raw ADC counts.  One channel's calibration is never
 applied to another channel merely to make its trace look plausible.
-ROLL remains CH1-only pending separate transport validation.
+
+The standard string `range` configuration exposes the three independently
+observed frontend states as `Narrow`, `Medium`, and `Wide`. They correspond to
+the raw hardware settings A2=01, A2=02, and A2=03 and nominal scales of
+0.0002, 0.00125, and 0.01 V/count respectively. These relative names describe
+the proven sensitivity ordering without claiming an unproven volts/div value.
+The selected value is applied to all eight physical inputs during initialization
+and selects the matching persisted per-channel calibration. Diagnostic logs
+retain both the meaningful name and raw A2 value.
+
+### Standalone sigrok-cli calibration utility
+
+`contrib/hantek-1008c-calibrate.py` calibrates the production driver without
+checking out or importing the companion Python protocol-laboratory project.
+It invokes the installed `sigrok-cli`, captures raw ADC counts under a temporary
+empty `XDG_DATA_HOME`, and atomically updates
+`~/.local/share/hantek-1008c/calibration.ini` (or `$XDG_DATA_HOME` when set).
+
+Close PulseView and any other process using the scope, then run:
+
+```
+python3 contrib/hantek-1008c-calibrate.py
+```
+
+The default run covers CH1 through CH8 and Narrow, Medium, and Wide. For each channel
+it captures all requested grounded ranges before asking for one cable move to
+the onboard 1 kHz / nominal 2 Vp-p reference. A2=02 and A2=03 are then validated
+consecutively. A2=01 is grounded-zero only because the onboard reference
+overranges that frontend state. Subsets can be selected, for example:
+
+```
+python3 contrib/hantek-1008c-calibrate.py --channels 3,4 --ranges Medium,Wide
+```
+
+Each capture retries complete `sigrok-cli` acquisitions for up to 15 seconds
+at 500 ms intervals after transient USB disappearance, timeout, or malformed
+capture output. Recovery entry, each failed attempt, success, elapsed time, and
+the terminal error are printed explicitly. Ground captures are rejected above
+5 counts standard deviation or 32 counts span. Reference validation requires
+1.6--2.4 Vp-p and 900--1100 Hz; it records validation results but never changes
+the saved zero offset or nominal volts-per-count scale.
+
+The utility's parser and measurement checks can be exercised without hardware:
+
+```
+python3 contrib/hantek-1008c-calibrate.py --self-test
+```
 
 ### Multi-channel Scan geometry (2026-09-05)
 

@@ -66,6 +66,7 @@ struct dev_context {
 	double calibration_zero_adc[H1008C_NUM_HW_CHANNELS];
 	double calibration_volts_per_count[H1008C_NUM_HW_CHANNELS];
 	uint8_t a3;
+	uint8_t range_id;
 	enum h1008c_acquisition_mode acquisition_mode;
 	gboolean trigger_enabled;
 	gboolean trigger_source_enabled;
@@ -84,7 +85,8 @@ SR_PRIV int h1008c_open(struct sr_dev_inst *sdi);
 SR_PRIV int h1008c_close(struct sr_dev_inst *sdi);
 SR_PRIV int h1008c_reopen(struct sr_dev_inst *sdi);
 SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi, uint8_t selected_a3,
-		unsigned int enabled_count, const uint8_t enabled_mask[H1008C_NUM_HW_CHANNELS]);
+		uint8_t selected_range, unsigned int enabled_count,
+		const uint8_t enabled_mask[H1008C_NUM_HW_CHANNELS]);
 SR_PRIV int h1008c_acquire_triggered_frame(const struct sr_dev_inst *sdi,
 		float **samples, size_t *sample_count);
 SR_PRIV int h1008c_abort_frame(const struct sr_dev_inst *sdi);

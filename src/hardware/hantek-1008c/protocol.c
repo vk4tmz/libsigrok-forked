@@ -277,7 +277,8 @@ static int startup_range_pass(const struct sr_dev_inst *sdi, uint8_t range)
 }
 
 SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi, uint8_t selected_a3,
-		unsigned int enabled_count, const uint8_t enabled_mask[H1008C_NUM_HW_CHANNELS])
+		uint8_t selected_range, unsigned int enabled_count,
+		const uint8_t enabled_mask[H1008C_NUM_HW_CHANNELS])
 {
 	/* Full direct-ADC initialization validated against mfg92/hantek1008py. */
 	static const uint8_t b0[] = { 0xb0 };
@@ -305,7 +306,7 @@ SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi, uint8_t selected_a3,
 	static const uint8_t e6[] = { 0xe6, 0x01 };
 	uint8_t a0_selected[] = { 0xa0, (uint8_t)enabled_count };
 	uint8_t aa_selected[] = { 0xaa, 0, 0, 0, 0, 0, 0, 0, 0 };
-	static const uint8_t a2_ch1[] = { 0xa2, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03 };
+	uint8_t a2_selected[] = { 0xa2, 0, 0, 0, 0, 0, 0, 0, 0 };
 	static const uint8_t ac_final[] = { 0xac, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x05, 0x79 };
 	static const uint8_t ab[] = { 0xab, 0x08, 0x00 };
 	static const uint8_t e9[] = { 0xe9 };
@@ -323,14 +324,16 @@ SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi, uint8_t selected_a3,
 		{ fa, sizeof(fa) }, { a3_selected, sizeof(a3_selected) },
 		{ ac_pre, sizeof(ac_pre) }, { e4, sizeof(e4) }, { e6, sizeof(e6) },
 		{ f3, sizeof(f3) }, { a0_selected, sizeof(a0_selected) },
-		{ aa_selected, sizeof(aa_selected) }, { a2_ch1, sizeof(a2_ch1) },
+		{ aa_selected, sizeof(aa_selected) }, { a2_selected, sizeof(a2_selected) },
 		{ a3_selected, sizeof(a3_selected) }, { c1, sizeof(c1) }, { a7, sizeof(a7) },
 		{ ac_final, sizeof(ac_final) }, { ab, sizeof(ab) }, { e9, sizeof(e9) },
 	};
 	size_t i;
 
-	for (i = 0; i < H1008C_NUM_HW_CHANNELS; i++)
+	for (i = 0; i < H1008C_NUM_HW_CHANNELS; i++) {
 		aa_selected[i + 1] = enabled_mask[i] ? 1 : 0;
+		a2_selected[i + 1] = selected_range;
+	}
 
 	if (command(sdi, b0, sizeof(b0)) != SR_OK)
 		return SR_ERR;
@@ -354,8 +357,11 @@ SR_PRIV int h1008c_startup(const struct sr_dev_inst *sdi, uint8_t selected_a3,
 		if (command(sdi, init3_tail[i].data, init3_tail[i].len) != SR_OK)
 			return SR_ERR;
 	}
-	sr_info("Hantek 1008C direct-ADC initialization complete (%u channel(s), A3=%02x).",
-		enabled_count, selected_a3);
+	sr_info("Hantek 1008C direct-ADC initialization complete "
+		"(%u channel(s), A3=%02x, range=%s, A2=%02x).",
+		enabled_count, selected_a3,
+		selected_range == 1 ? "Narrow" :
+		selected_range == 2 ? "Medium" : "Wide", selected_range);
 	return SR_OK;
 }
 

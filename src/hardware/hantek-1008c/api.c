@@ -29,6 +29,7 @@ static const uint32_t devopts[] = {
 	SR_CONF_LIMIT_SAMPLES | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_LIMIT_FRAMES | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_DEVICE_MODE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_RANGE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 	SR_CONF_SAMPLERATE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 	SR_CONF_TRIGGER_SOURCE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 	SR_CONF_TRIGGER_SLOPE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
@@ -109,6 +110,7 @@ static const struct h1008c_rate multichannel_triggered_rate_table[] = {
 static const char *trigger_sources[] = { "None", "CH1" };
 static const char *trigger_slopes[] = { "r", "f" };
 static const char *device_modes[] = { "Trigger", "Scan", "Roll" };
+static const char *range_names[] = { "Narrow", "Medium", "Wide" };
 static const int32_t trigger_matches[] = {
 	SR_TRIGGER_RISING,
 	SR_TRIGGER_FALLING,
@@ -340,6 +342,7 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 		devc->acquisition_width = 1;
 		devc->enabled_mask[0] = 1;
 		devc->a3 = H1008C_A3_24MSPS;
+		devc->range_id = H1008C_A2_RANGE_MVP;
 		devc->acquisition_mode = H1008C_MODE_TRIGGERED;
 		devc->trigger_enabled = FALSE;
 		devc->trigger_source_enabled = FALSE;
@@ -379,6 +382,9 @@ static int config_get(uint32_t key, GVariant **data,
 			devc->acquisition_mode == H1008C_MODE_TRIGGERED ? "Trigger" :
 			devc->acquisition_mode == H1008C_MODE_SCAN ? "Scan" : "Roll");
 		return SR_OK;
+	case SR_CONF_RANGE:
+		*data = g_variant_new_string(range_names[devc->range_id - 1]);
+		return SR_OK;
 	case SR_CONF_TRIGGER_SOURCE:
 		*data = g_variant_new_string(
 			devc->trigger_source_enabled ? "CH1" : "None");
@@ -406,6 +412,18 @@ static int config_set(uint32_t key, GVariant *data,
 	}
 	if (key == SR_CONF_LIMIT_FRAMES)
 		return sr_sw_limits_config_set(&devc->limits, key, data);
+	if (key == SR_CONF_RANGE) {
+		int idx = std_str_idx(data, ARRAY_AND_SIZE(range_names));
+
+		if (idx < 0)
+			return SR_ERR_ARG;
+		devc->range_id = idx + 1;
+		sr_info("Selected input range: %s (A2=%02x, nominal %.9g V/count).",
+			range_names[idx], devc->range_id,
+			devc->range_id == 1 ? 0.0002 :
+			devc->range_id == 2 ? 0.00125 : 0.01);
+		return SR_OK;
+	}
 	if (key == SR_CONF_DEVICE_MODE) {
 		const struct h1008c_rate *default_rate;
 		const char *name = g_variant_get_string(data, NULL);
@@ -527,6 +545,10 @@ static int config_list(uint32_t key, GVariant **data,
 		*data = g_variant_new_strv(device_modes, ARRAY_SIZE(device_modes));
 		return SR_OK;
 	}
+	if (key == SR_CONF_RANGE) {
+		*data = g_variant_new_strv(range_names, ARRAY_SIZE(range_names));
+		return SR_OK;
+	}
 	if (key == SR_CONF_TRIGGER_SOURCE) {
 		*data = g_variant_new_strv(trigger_sources, ARRAY_SIZE(trigger_sources));
 		return SR_OK;
@@ -627,7 +649,7 @@ static void load_persistent_calibration(const struct sr_dev_inst *sdi)
 	for (channel = 0; channel < H1008C_NUM_HW_CHANNELS; channel++) {
 		section = g_strdup_printf("device %s channel CH%u range %02X",
 			sdi->connection_id ? sdi->connection_id : "", channel + 1,
-			H1008C_A2_RANGE_MVP);
+			devc->range_id);
 		if (!g_key_file_has_group(keyfile, section)) {
 			g_free(section);
 			continue;
@@ -654,8 +676,9 @@ static void load_persistent_calibration(const struct sr_dev_inst *sdi)
 		devc->calibration_zero_adc[channel] = zero_adc;
 		devc->calibration_volts_per_count[channel] = volts_per_count;
 		devc->calibration_valid[channel] = TRUE;
-		sr_info("Loaded calibration for CH%u A2=%02X: zero=%.3f, "
-			"scale=%.9g V/count.", channel + 1, H1008C_A2_RANGE_MVP,
+		sr_info("Loaded calibration for CH%u range %s (A2=%02X): zero=%.3f, "
+			"scale=%.9g V/count.", channel + 1,
+			range_names[devc->range_id - 1], devc->range_id,
 			zero_adc, volts_per_count);
 		g_free(section);
 	}
@@ -915,7 +938,7 @@ static int reopen_and_startup_with_retry(struct sr_dev_inst *sdi,
 	attempts = 1;
 	ret = h1008c_reopen(sdi);
 	if (ret == SR_OK)
-		ret = h1008c_startup(sdi, devc->a3, devc->enabled_count,
+		ret = h1008c_startup(sdi, devc->a3, devc->range_id, devc->enabled_count,
 			devc->enabled_mask);
 	if (ret == SR_OK)
 		return SR_OK;
@@ -933,7 +956,7 @@ static int reopen_and_startup_with_retry(struct sr_dev_inst *sdi,
 			(double)(g_get_monotonic_time() - started) / G_USEC_PER_SEC);
 		ret = h1008c_reopen(sdi);
 		if (ret == SR_OK)
-			ret = h1008c_startup(sdi, devc->a3, devc->enabled_count,
+			ret = h1008c_startup(sdi, devc->a3, devc->range_id, devc->enabled_count,
 				devc->enabled_mask);
 		if (ret == SR_OK) {
 			sr_info("USB recovery succeeded after %.1f s (%u setup attempts).",
