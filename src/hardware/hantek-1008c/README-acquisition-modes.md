@@ -882,6 +882,15 @@ The utility's parser and measurement checks can be exercised without hardware:
 sigrok-hantek-1008c-calibrate --self-test
 ```
 
+### Hardware-independent driver regression tests
+
+When the Check test framework and the Hantek driver are enabled, `make check`
+also builds `tests/hantek-1008c`. It locks down the validated Triggered physical
+widths, the distinct Scan and Roll divisors, all aggregate rate/A3 tables,
+effective per-channel rate selection for one through eight channels, invalid
+rate rejection, and the Narrow/Medium/Wide range mapping. These model tests do
+not open or require a USB device.
+
 ### Multi-channel Scan geometry (2026-09-05)
 
 An A3=0x1a C9/CA matrix captured contiguous CH1..CHN selections for every

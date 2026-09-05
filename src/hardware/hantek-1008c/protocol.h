@@ -81,6 +81,24 @@ struct dev_context {
 	size_t roll_carry_len;
 };
 
+struct h1008c_rate {
+	uint64_t samplerate;
+	uint8_t a3;
+	enum h1008c_acquisition_mode mode;
+};
+
+SR_PRIV unsigned int h1008c_acquisition_width(unsigned int count);
+SR_PRIV unsigned int h1008c_rate_divisor(
+		enum h1008c_acquisition_mode mode, unsigned int enabled_count);
+SR_PRIV const char *h1008c_range_name(uint8_t range_id);
+SR_PRIV int h1008c_range_id(const char *name);
+SR_PRIV size_t h1008c_rate_count(enum h1008c_acquisition_mode mode);
+SR_PRIV int h1008c_rate_get(enum h1008c_acquisition_mode mode,
+		size_t index, struct h1008c_rate *rate);
+SR_PRIV const struct h1008c_rate *h1008c_find_effective_rate(
+		uint64_t samplerate, unsigned int divisor,
+		enum h1008c_acquisition_mode mode);
+
 SR_PRIV int h1008c_open(struct sr_dev_inst *sdi);
 SR_PRIV int h1008c_close(struct sr_dev_inst *sdi);
 SR_PRIV int h1008c_reopen(struct sr_dev_inst *sdi);

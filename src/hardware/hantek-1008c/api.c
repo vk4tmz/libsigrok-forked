@@ -36,12 +36,6 @@ static const uint32_t devopts[] = {
 	SR_CONF_TRIGGER_MATCH | SR_CONF_LIST,
 };
 
-struct h1008c_rate {
-	uint64_t samplerate;
-	uint8_t a3;
-	enum h1008c_acquisition_mode mode;
-};
-
 /*
  * PulseView-facing aggregate Scan and Roll transport rates. Roll transports
  * one word for every enabled channel plus one auxiliary word per row, so its
@@ -118,14 +112,14 @@ static const int32_t trigger_matches[] = {
 
 static int apply_sample_limit(struct dev_context *devc);
 
-static unsigned int acquisition_width_for_count(unsigned int count)
+SR_PRIV unsigned int h1008c_acquisition_width(unsigned int count)
 {
 	static const uint8_t widths[] = { 0, 1, 2, 4, 4, 6, 6, 8, 8 };
 
 	return count <= H1008C_NUM_HW_CHANNELS ? widths[count] : 0;
 }
 
-static unsigned int rate_divisor_for_mode(enum h1008c_acquisition_mode mode,
+SR_PRIV unsigned int h1008c_rate_divisor(enum h1008c_acquisition_mode mode,
 		unsigned int enabled_count)
 {
 	if (!enabled_count)
@@ -134,7 +128,61 @@ static unsigned int rate_divisor_for_mode(enum h1008c_acquisition_mode mode,
 		return enabled_count;
 	if (mode == H1008C_MODE_ROLL)
 		return enabled_count + 1;
-	return acquisition_width_for_count(enabled_count);
+	return h1008c_acquisition_width(enabled_count);
+}
+
+SR_PRIV const char *h1008c_range_name(uint8_t range_id)
+{
+	return range_id >= 1 && range_id <= ARRAY_SIZE(range_names) ?
+		range_names[range_id - 1] : NULL;
+}
+
+SR_PRIV int h1008c_range_id(const char *name)
+{
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(range_names); i++) {
+		if (!strcmp(name, range_names[i]))
+			return i + 1;
+	}
+	return -1;
+}
+
+SR_PRIV size_t h1008c_rate_count(enum h1008c_acquisition_mode mode)
+{
+	size_t count = 0, i;
+
+	if (mode == H1008C_MODE_TRIGGERED)
+		return ARRAY_SIZE(multichannel_triggered_rate_table);
+	for (i = 0; i < ARRAY_SIZE(rate_table); i++) {
+		if (rate_table[i].mode == mode)
+			count++;
+	}
+	return count;
+}
+
+SR_PRIV int h1008c_rate_get(enum h1008c_acquisition_mode mode,
+		size_t index, struct h1008c_rate *rate)
+{
+	size_t i;
+
+	if (!rate)
+		return SR_ERR_ARG;
+	if (mode == H1008C_MODE_TRIGGERED) {
+		if (index >= ARRAY_SIZE(multichannel_triggered_rate_table))
+			return SR_ERR_ARG;
+		*rate = multichannel_triggered_rate_table[index];
+		return SR_OK;
+	}
+	for (i = 0; i < ARRAY_SIZE(rate_table); i++) {
+		if (rate_table[i].mode != mode)
+			continue;
+		if (!index--) {
+			*rate = rate_table[i];
+			return SR_OK;
+		}
+	}
+	return SR_ERR_ARG;
 }
 
 static unsigned int enabled_channel_count(const struct sr_dev_inst *sdi)
@@ -166,11 +214,11 @@ static void capture_enabled_mask(const struct sr_dev_inst *sdi,
 			devc->enabled_count++;
 		}
 	}
-	devc->acquisition_width = acquisition_width_for_count(devc->enabled_count);
+	devc->acquisition_width = h1008c_acquisition_width(devc->enabled_count);
 }
 
 
-static const struct h1008c_rate *find_effective_rate(uint64_t samplerate,
+SR_PRIV const struct h1008c_rate *h1008c_find_effective_rate(uint64_t samplerate,
 		unsigned int divisor, enum h1008c_acquisition_mode mode)
 {
 	size_t i;
@@ -383,7 +431,7 @@ static int config_get(uint32_t key, GVariant **data,
 			devc->acquisition_mode == H1008C_MODE_SCAN ? "Scan" : "Roll");
 		return SR_OK;
 	case SR_CONF_RANGE:
-		*data = g_variant_new_string(range_names[devc->range_id - 1]);
+		*data = g_variant_new_string(h1008c_range_name(devc->range_id));
 		return SR_OK;
 	case SR_CONF_TRIGGER_SOURCE:
 		*data = g_variant_new_string(
@@ -413,13 +461,14 @@ static int config_set(uint32_t key, GVariant *data,
 	if (key == SR_CONF_LIMIT_FRAMES)
 		return sr_sw_limits_config_set(&devc->limits, key, data);
 	if (key == SR_CONF_RANGE) {
-		int idx = std_str_idx(data, ARRAY_AND_SIZE(range_names));
+		const char *name = g_variant_get_string(data, NULL);
+		int range_id = h1008c_range_id(name);
 
-		if (idx < 0)
+		if (range_id < 0)
 			return SR_ERR_ARG;
-		devc->range_id = idx + 1;
+		devc->range_id = range_id;
 		sr_info("Selected input range: %s (A2=%02x, nominal %.9g V/count).",
-			range_names[idx], devc->range_id,
+			h1008c_range_name(devc->range_id), devc->range_id,
 			devc->range_id == 1 ? 0.0002 :
 			devc->range_id == 2 ? 0.00125 : 0.01);
 		return SR_OK;
@@ -439,7 +488,7 @@ static int config_set(uint32_t key, GVariant *data,
 		else
 			return SR_ERR_ARG;
 		enabled_count = MAX(1U, enabled_channel_count(sdi));
-		divisor = rate_divisor_for_mode(mode, enabled_count);
+		divisor = h1008c_rate_divisor(mode, enabled_count);
 		if (mode == devc->acquisition_mode)
 			return SR_OK;
 		default_rate = default_rate_for_mode(mode, divisor);
@@ -473,9 +522,9 @@ static int config_set(uint32_t key, GVariant *data,
 	if (key != SR_CONF_SAMPLERATE)
 		return SR_ERR_NA;
 	samplerate = g_variant_get_uint64(data);
-	devc->acquisition_width = acquisition_width_for_count(enabled_channel_count(sdi));
-	rate = find_effective_rate(samplerate,
-		rate_divisor_for_mode(devc->acquisition_mode,
+	devc->acquisition_width = h1008c_acquisition_width(enabled_channel_count(sdi));
+	rate = h1008c_find_effective_rate(samplerate,
+		h1008c_rate_divisor(devc->acquisition_mode,
 			enabled_channel_count(sdi)),
 		devc->acquisition_mode);
 	if (!rate)
@@ -487,7 +536,7 @@ static int config_set(uint32_t key, GVariant *data,
 	 * modes remain exact.
 	 */
 	if (select_rate(devc, rate,
-	    rate_divisor_for_mode(devc->acquisition_mode,
+	    h1008c_rate_divisor(devc->acquisition_mode,
 		    enabled_channel_count(sdi))) != SR_OK)
 		return SR_ERR;
 	sr_info("Selected %" PRIu64 " samples/s: %s mode, A3=%02x.",
@@ -515,7 +564,7 @@ static int config_list(uint32_t key, GVariant **data,
 		/* Keep configuration usable while the frontend temporarily has no
 		 * channels selected; acquisition_start still rejects that state. */
 		enabled_count = MAX(1U, enabled_channel_count(sdi));
-		divisor = rate_divisor_for_mode(devc->acquisition_mode, enabled_count);
+		divisor = h1008c_rate_divisor(devc->acquisition_mode, enabled_count);
 		if (devc->acquisition_mode == H1008C_MODE_TRIGGERED) {
 			for (i = 0;
 			     i < ARRAY_SIZE(multichannel_triggered_rate_table); i++) {
@@ -584,18 +633,18 @@ static int config_channel_set(const struct sr_dev_inst *sdi,
 
 	/* Preserve the aggregate A3 selection across channel-count changes. */
 	{
-		unsigned int divisor = rate_divisor_for_mode(devc->acquisition_mode,
+		unsigned int divisor = h1008c_rate_divisor(devc->acquisition_mode,
 			devc->enabled_count);
-		rate = find_effective_rate(devc->base_samplerate / divisor,
+		rate = h1008c_find_effective_rate(devc->base_samplerate / divisor,
 			divisor, devc->acquisition_mode);
 	}
 	if (!rate)
 		rate = default_rate_for_mode(devc->acquisition_mode,
-			rate_divisor_for_mode(devc->acquisition_mode,
+			h1008c_rate_divisor(devc->acquisition_mode,
 				devc->enabled_count));
 
 	return select_rate(devc, rate,
-		rate_divisor_for_mode(devc->acquisition_mode, devc->enabled_count));
+		h1008c_rate_divisor(devc->acquisition_mode, devc->enabled_count));
 }
 
 static int dev_open(struct sr_dev_inst *sdi)
@@ -678,7 +727,7 @@ static void load_persistent_calibration(const struct sr_dev_inst *sdi)
 		devc->calibration_valid[channel] = TRUE;
 		sr_info("Loaded calibration for CH%u range %s (A2=%02X): zero=%.3f, "
 			"scale=%.9g V/count.", channel + 1,
-			range_names[devc->range_id - 1], devc->range_id,
+			h1008c_range_name(devc->range_id), devc->range_id,
 			zero_adc, volts_per_count);
 		g_free(section);
 	}
@@ -984,7 +1033,7 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 		return SR_ERR_ARG;
 	}
 	devc->samplerate = devc->base_samplerate /
-		rate_divisor_for_mode(devc->acquisition_mode, devc->enabled_count);
+		h1008c_rate_divisor(devc->acquisition_mode, devc->enabled_count);
 	if (apply_sample_limit(devc) != SR_OK)
 		return SR_ERR;
 

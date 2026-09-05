@@ -727,8 +727,7 @@ SR_PRIV int h1008c_read_scan(const struct sr_dev_inst *sdi,
 		if (devc->scan_carry_len) {
 			sr_warn("Discarding %zu partial Scan byte(s) across "
 				"quarantined C9 discontinuity.", devc->scan_carry_len);
-	devc->scan_carry_len = 0;
-	devc->roll_carry_len = 0;
+			devc->scan_carry_len = 0;
 		}
 		return SR_OK;
 	}
