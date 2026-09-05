@@ -515,11 +515,10 @@ SR_PRIV int h1008c_start_roll(const struct sr_dev_inst *sdi, uint8_t a3_id)
 	/*
 	 * Public hantek1008py sequence for continuous/roll acquisition:
 	 * A3 <roll-rate-id>, short settle, F3, A4 02, C0, C2.  Data is then
-	 * queried with C7 and drained with C8.  CH1-only roll transport is
-	 * framed in 4-byte rows.  The first word is the historically validated
-	 * CH1 lane used by this diagnostic path; newer C9/CA evidence shows that
-	 * the second word is also ADC-like, so its exact semantics remain open.
-	 * Do not reinterpret, average, or otherwise combine the two here.
+	 * queried with C7 and drained with C8. Roll rows contain one little-endian
+	 * ADC word for every enabled channel in ascending physical order, followed
+	 * by one auxiliary word. The auxiliary slot is structural and is not sent
+	 * as an analogue channel.
 	 */
 	if (command(sdi, a3, sizeof(a3)) != SR_OK)
 		return SR_ERR;
@@ -540,10 +539,11 @@ SR_PRIV int h1008c_read_roll(const struct sr_dev_inst *sdi,
 	static const uint8_t f3[] = { 0xf3 };
 	static const uint8_t c7[] = { 0xc7 };
 	static const uint8_t c8[] = { 0xc8 };
-	uint8_t rx[H1008C_USB_PACKET], *raw;
+	struct dev_context *devc = sdi->priv;
+	uint8_t rx[H1008C_USB_PACKET], *raw, *framed;
 	float *out;
 	uint16_t ready_len;
-	size_t done, rows, i;
+	size_t done, total, complete, row_bytes, rows, i, lane;
 	int actual;
 
 	*samples = NULL;
@@ -561,12 +561,6 @@ SR_PRIV int h1008c_read_roll(const struct sr_dev_inst *sdi,
 	if (!ready_len)
 		return SR_OK;
 
-	/* Two 16-bit words per transport row; word1 semantics remain unresolved. */
-	if (ready_len % 4) {
-		sr_err("C7 returned %u roll bytes, not divisible by the 4-byte transport row size.",
-			ready_len);
-		return SR_ERR;
-	}
 	raw = g_try_malloc(ready_len);
 	if (!raw)
 		return SR_ERR_MALLOC;
@@ -587,16 +581,45 @@ SR_PRIV int h1008c_read_roll(const struct sr_dev_inst *sdi,
 		done += MIN((size_t)actual, (size_t)ready_len - done);
 	}
 
-	rows = ready_len / 4;
-	out = g_try_new(float, rows);
-	if (!out) {
+	if (!devc->enabled_count) {
+		g_free(raw);
+		return SR_ERR;
+	}
+	row_bytes = 2 * (devc->enabled_count + 1);
+	total = devc->roll_carry_len + ready_len;
+	framed = g_try_malloc(total);
+	if (!framed) {
 		g_free(raw);
 		return SR_ERR_MALLOC;
 	}
-	for (i = 0; i < rows; i++)
-		out[i] = (float)(((uint16_t)raw[i * 4] |
-			((uint16_t)raw[i * 4 + 1] << 8)) & 0x0fff);
+	memcpy(framed, devc->roll_carry, devc->roll_carry_len);
+	memcpy(framed + devc->roll_carry_len, raw, ready_len);
 	g_free(raw);
+	complete = total - total % row_bytes;
+	devc->roll_carry_len = total - complete;
+	if (devc->roll_carry_len)
+		memcpy(devc->roll_carry, framed + complete, devc->roll_carry_len);
+	if (!complete) {
+		g_free(framed);
+		return SR_OK;
+	}
+
+	rows = complete / row_bytes;
+	out = g_try_new(float, rows * devc->enabled_count);
+	if (!out) {
+		g_free(framed);
+		return SR_ERR_MALLOC;
+	}
+	for (i = 0; i < rows; i++) {
+		for (lane = 0; lane < devc->enabled_count; lane++) {
+			size_t offset = i * row_bytes + lane * 2;
+
+			out[i * devc->enabled_count + lane] =
+				(float)(((uint16_t)framed[offset] |
+				((uint16_t)framed[offset + 1] << 8)) & 0x0fff);
+		}
+	}
+	g_free(framed);
 
 	*samples = out;
 	*sample_count = rows;
@@ -698,7 +721,8 @@ SR_PRIV int h1008c_read_scan(const struct sr_dev_inst *sdi,
 		if (devc->scan_carry_len) {
 			sr_warn("Discarding %zu partial Scan byte(s) across "
 				"quarantined C9 discontinuity.", devc->scan_carry_len);
-			devc->scan_carry_len = 0;
+	devc->scan_carry_len = 0;
+	devc->roll_carry_len = 0;
 		}
 		return SR_OK;
 	}

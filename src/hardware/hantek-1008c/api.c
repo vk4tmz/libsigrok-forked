@@ -42,10 +42,9 @@ struct h1008c_rate {
 };
 
 /*
- * PulseView-facing aggregate Scan and CH1-only Roll rates. Diagnostic C7/C8
- * ROLL rates retain
- * their established word0-only mapping except that official Scan takes
- * precedence at the shared public 2 samples/s setting.
+ * PulseView-facing aggregate Scan and Roll transport rates. Roll transports
+ * one word for every enabled channel plus one auxiliary word per row, so its
+ * stored aggregate values are twice the established CH1-only sample rates.
  * Official C9/CA Scan is exposed for the validated A3=1A..22 region. Scan
  * words are interleaved across the exact enabled-channel count, without the
  * odd-count dummy lanes used by Triggered mode. Nominal aggregate Scan rates
@@ -55,25 +54,26 @@ struct h1008c_rate {
  * not advertised.
  */
 static const struct h1008c_rate rate_table[] = {
-	{ UINT64_C(1),       0x22, H1008C_MODE_ROLL },
+	{ UINT64_C(2),       0x22, H1008C_MODE_ROLL },
 	{ UINT64_C(2),       0x22, H1008C_MODE_SCAN },
 	{ UINT64_C(4),       0x21, H1008C_MODE_SCAN },
-	{ UINT64_C(5),       0x20, H1008C_MODE_ROLL },
+	{ UINT64_C(4),       0x21, H1008C_MODE_ROLL },
+	{ UINT64_C(10),      0x20, H1008C_MODE_ROLL },
 	{ UINT64_C(8),       0x20, H1008C_MODE_SCAN },
-	{ UINT64_C(9),       0x1f, H1008C_MODE_ROLL },
+	{ UINT64_C(18),      0x1f, H1008C_MODE_ROLL },
 	{ UINT64_C(20),      0x1f, H1008C_MODE_SCAN },
-	{ UINT64_C(23),      0x1e, H1008C_MODE_ROLL },
+	{ UINT64_C(46),      0x1e, H1008C_MODE_ROLL },
 	{ UINT64_C(40),      0x1e, H1008C_MODE_SCAN },
-	{ UINT64_C(50),      0x1d, H1008C_MODE_ROLL },
+	{ UINT64_C(100),     0x1d, H1008C_MODE_ROLL },
 	{ UINT64_C(80),      0x1d, H1008C_MODE_SCAN },
-	{ UINT64_C(100),     0x1c, H1008C_MODE_ROLL },
+	{ UINT64_C(200),     0x1c, H1008C_MODE_ROLL },
 	{ UINT64_C(200),     0x1c, H1008C_MODE_SCAN },
-	{ UINT64_C(201),     0x1b, H1008C_MODE_ROLL },
+	{ UINT64_C(402),     0x1b, H1008C_MODE_ROLL },
 	{ UINT64_C(400),     0x1b, H1008C_MODE_SCAN },
-	{ UINT64_C(401),     0x1a, H1008C_MODE_ROLL },
+	{ UINT64_C(802),     0x1a, H1008C_MODE_ROLL },
 	{ UINT64_C(800),     0x1a, H1008C_MODE_SCAN },
-	{ UINT64_C(1003),    0x19, H1008C_MODE_ROLL },
-	{ UINT64_C(2006),    0x18, H1008C_MODE_ROLL },
+	{ UINT64_C(2006),    0x19, H1008C_MODE_ROLL },
+	{ UINT64_C(4012),    0x18, H1008C_MODE_ROLL },
 };
 
 /*
@@ -130,6 +130,8 @@ static unsigned int rate_divisor_for_mode(enum h1008c_acquisition_mode mode,
 		return 0;
 	if (mode == H1008C_MODE_SCAN)
 		return enabled_count;
+	if (mode == H1008C_MODE_ROLL)
+		return enabled_count + 1;
 	return acquisition_width_for_count(enabled_count);
 }
 
@@ -173,30 +175,7 @@ static const struct h1008c_rate *find_effective_rate(uint64_t samplerate,
 
 	if (!divisor)
 		return NULL;
-	if (divisor == 1) {
-		if (mode == H1008C_MODE_TRIGGERED) {
-			for (i = 0;
-			     i < ARRAY_SIZE(multichannel_triggered_rate_table); i++) {
-				const struct h1008c_rate *rate =
-					&multichannel_triggered_rate_table[i];
-
-				if (rate->samplerate == samplerate)
-					return rate;
-			}
-			return NULL;
-		}
-		for (i = 0; i < ARRAY_SIZE(rate_table); i++) {
-			const struct h1008c_rate *rate = &rate_table[i];
-
-			if (rate->mode == mode && rate->samplerate == samplerate)
-				return rate;
-		}
-		return NULL;
-	}
-	if (mode == H1008C_MODE_ROLL)
-		return NULL;
-
-	if (mode == H1008C_MODE_SCAN) {
+	if (mode != H1008C_MODE_TRIGGERED) {
 		for (i = 0; i < ARRAY_SIZE(rate_table); i++) {
 			const struct h1008c_rate *rate = &rate_table[i];
 
@@ -220,13 +199,8 @@ static const struct h1008c_rate *default_rate_for_mode(
 {
 	const struct h1008c_rate *selected = NULL;
 	size_t i;
+	(void)divisor;
 
-	if (divisor > 1 && mode == H1008C_MODE_ROLL)
-		return NULL;
-	if (divisor > 1 && mode == H1008C_MODE_TRIGGERED) {
-		return &multichannel_triggered_rate_table[
-			ARRAY_SIZE(multichannel_triggered_rate_table) - 1];
-	}
 	if (mode == H1008C_MODE_TRIGGERED)
 		return &multichannel_triggered_rate_table[
 			ARRAY_SIZE(multichannel_triggered_rate_table) - 1];
@@ -448,10 +422,6 @@ static int config_set(uint32_t key, GVariant *data,
 			return SR_ERR_ARG;
 		enabled_count = MAX(1U, enabled_channel_count(sdi));
 		divisor = rate_divisor_for_mode(mode, enabled_count);
-		if (enabled_count > 1 && mode == H1008C_MODE_ROLL) {
-			sr_err("Roll device mode requires exactly one enabled channel.");
-			return SR_ERR_NA;
-		}
 		if (mode == devc->acquisition_mode)
 			return SR_OK;
 		default_rate = default_rate_for_mode(mode, divisor);
@@ -528,42 +498,26 @@ static int config_list(uint32_t key, GVariant **data,
 		 * channels selected; acquisition_start still rejects that state. */
 		enabled_count = MAX(1U, enabled_channel_count(sdi));
 		divisor = rate_divisor_for_mode(devc->acquisition_mode, enabled_count);
-		if (divisor == 1) {
-			if (devc->acquisition_mode == H1008C_MODE_TRIGGERED) {
-				for (i = 0;
-				     i < ARRAY_SIZE(multichannel_triggered_rate_table); i++)
-					rates[n++] =
-						multichannel_triggered_rate_table[i].samplerate;
-			} else {
-				for (i = 0; i < ARRAY_SIZE(rate_table); i++) {
-					if (rate_table[i].mode == devc->acquisition_mode)
-						rates[n++] = rate_table[i].samplerate;
-				}
+		if (devc->acquisition_mode == H1008C_MODE_TRIGGERED) {
+			for (i = 0;
+			     i < ARRAY_SIZE(multichannel_triggered_rate_table); i++) {
+				uint64_t effective =
+					multichannel_triggered_rate_table[i].samplerate /
+					divisor;
+
+				if (!n || rates[n - 1] != effective)
+					rates[n++] = effective;
 			}
 		} else {
-			if (devc->acquisition_mode == H1008C_MODE_ROLL)
-				return SR_ERR_NA;
-			if (devc->acquisition_mode == H1008C_MODE_SCAN) {
-				for (i = 0; i < ARRAY_SIZE(rate_table); i++) {
-					uint64_t effective;
+			for (i = 0; i < ARRAY_SIZE(rate_table); i++) {
+				uint64_t effective;
 
-					if (rate_table[i].mode != H1008C_MODE_SCAN ||
-					    rate_table[i].samplerate < divisor)
-						continue;
-					effective = rate_table[i].samplerate / divisor;
-					if (!n || rates[n - 1] != effective)
-						rates[n++] = effective;
-				}
-			} else {
-				for (i = 0;
-				     i < ARRAY_SIZE(multichannel_triggered_rate_table); i++) {
-					uint64_t effective =
-						multichannel_triggered_rate_table[i].samplerate /
-						divisor;
-
-					if (!n || rates[n - 1] != effective)
-						rates[n++] = effective;
-				}
+				if (rate_table[i].mode != devc->acquisition_mode ||
+				    rate_table[i].samplerate < divisor)
+					continue;
+				effective = rate_table[i].samplerate / divisor;
+				if (!n || rates[n - 1] != effective)
+					rates[n++] = effective;
 			}
 		}
 		*data = std_gvar_samplerates(rates, n);
@@ -606,17 +560,6 @@ static int config_channel_set(const struct sr_dev_inst *sdi,
 		return apply_sample_limit(devc);
 	}
 
-	/* Roll remains CH1-only. Moving to multiple channels therefore selects the
-	 * fastest valid Triggered rate atomically. Scan supports exact enabled-count
-	 * interleaving and stays selected. */
-	if (devc->enabled_count > 1 &&
-	    devc->acquisition_mode == H1008C_MODE_ROLL) {
-		rate = default_rate_for_mode(H1008C_MODE_TRIGGERED,
-			devc->acquisition_width);
-		sr_info("Channel selection requires Triggered device mode.");
-		return select_rate(devc, rate, devc->acquisition_width);
-	}
-
 	/* Preserve the aggregate A3 selection across channel-count changes. */
 	{
 		unsigned int divisor = rate_divisor_for_mode(devc->acquisition_mode,
@@ -626,7 +569,8 @@ static int config_channel_set(const struct sr_dev_inst *sdi,
 	}
 	if (!rate)
 		rate = default_rate_for_mode(devc->acquisition_mode,
-			devc->acquisition_width);
+			rate_divisor_for_mode(devc->acquisition_mode,
+				devc->enabled_count));
 
 	return select_rate(devc, rate,
 		rate_divisor_for_mode(devc->acquisition_mode, devc->enabled_count));
@@ -1015,11 +959,6 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 	if (!devc->enabled_count) {
 		sr_err("Hantek 1008C requires at least one enabled analog channel.");
 		return SR_ERR_ARG;
-	}
-	if (devc->enabled_count > 1 &&
-	    devc->acquisition_mode == H1008C_MODE_ROLL) {
-		sr_err("Multi-channel acquisition is not established for Roll mode.");
-		return SR_ERR_NA;
 	}
 	devc->samplerate = devc->base_samplerate /
 		rate_divisor_for_mode(devc->acquisition_mode, devc->enabled_count);

@@ -873,8 +873,44 @@ reported using the same integer truncation policy as Triggered mode.
 
 PulseView may now retain Scan while channels are enabled or disabled and
 immediately refreshes this count-dependent list. Roll selection with multiple
-enabled channels remains rejected without changing the active Trigger or Scan
-configuration.
+enabled channels was subsequently investigated separately as described below.
+
+### Multi-channel Roll geometry (2026-09-05)
+
+An A3=0x18 C7/C8 matrix covering contiguous eight-to-one and six sparse masks
+established a third transport geometry. Each Roll row contains the enabled ADC
+channels in ascending physical order followed by exactly one auxiliary word:
+
+```text
+CH1 only:       CH1, AUX
+CH1 + CH8:      CH1, CH8, AUX
+CH1 + CH5 + CH8: CH1, CH5, CH8, AUX
+```
+
+The auxiliary lane was the stable approximately 1720-count position. The known
+20 Hz CH1 sine, grounded CH2/CH5 baselines, and CH8 square wave retained their
+physical identities in every contiguous and sparse mask. Aggregate transport
+was approximately 3974 words/s independent of enabled count.
+
+The established CH1-only Roll rates already represent half of the underlying
+word rate because a one-channel row contains `CH1,AUX`. Multichannel effective
+rates are therefore `2 * CH1-only rate / (enabled channels + 1)`, with integer
+truncation and duplicate or sub-1 settings omitted:
+
+| Enabled channels | Advertised Roll samples/s/channel, slow to fast |
+|---:|---|
+| 1 | 1, 2, 5, 9, 23, 50, 100, 201, 401, 1003, 2006 |
+| 2 | 1, 3, 6, 15, 33, 66, 134, 267, 668, 1337 |
+| 3 | 1, 2, 4, 11, 25, 50, 100, 200, 501, 1003 |
+| 4 | 2, 3, 9, 20, 40, 80, 160, 401, 802 |
+| 5 | 1, 3, 7, 16, 33, 67, 133, 334, 668 |
+| 6 | 1, 2, 6, 14, 28, 57, 114, 286, 573 |
+| 7 | 1, 2, 5, 12, 25, 50, 100, 250, 501 |
+| 8 | 1, 2, 5, 11, 22, 44, 89, 222, 445 |
+
+The production decoder carries incomplete rows across C7/C8 polls, emits only
+the enabled ADC words, and deliberately discards the proven auxiliary slot. It
+does not filter, smooth, interpolate, or otherwise modify channel samples.
 
 ### PulseView end-to-end validation (2026-09-05)
 

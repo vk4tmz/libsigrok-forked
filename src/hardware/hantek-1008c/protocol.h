@@ -76,6 +76,8 @@ struct dev_context {
 	gint64 triggered_arm_us;
 	uint8_t scan_carry[2 * H1008C_NUM_HW_CHANNELS];
 	size_t scan_carry_len;
+	uint8_t roll_carry[2 * (H1008C_NUM_HW_CHANNELS + 1)];
+	size_t roll_carry_len;
 };
 
 SR_PRIV int h1008c_open(struct sr_dev_inst *sdi);
