@@ -797,7 +797,35 @@ The exact role of A0 remains unresolved; changing it between logical count and
 rounded width did not alter the measured geometry.  The driver writes the
 logical enabled count to A0 and the true physical mask to AA.
 
-Production multi-channel acquisition supports Triggered A3=0x11 and A3=0x0f.
+Production multi-channel acquisition supports Triggered A3=0x0f and A3=0x11
+through A3=0x19. Their aggregate-rate model is 2.4M, 800k, 400k, 200k, 80k,
+40k, 20k, 8k, 4k and 2k word/s respectively. PulseView receives the aggregate
+rate divided by the physical acquisition width.
+
+The expected PulseView lists for the one-build validation sweep are:
+
+| Enabled channels | Width | Validated samples/s/channel, slow to fast |
+|---:|---:|---|
+| 2 | 2 | 1k, 2k, 4k, 10k, 20k, 40k, 100k, 200k, 400k, 1.2M |
+| 3 or 4 | 4 | 500, 1k, 2k, 5k, 10k, 20k, 50k, 100k, 200k, 600k |
+| 5 or 6 | 6 | 333, 666, 1.333k, 3.333k, 6.666k, 13.333k, 33.333k, 66.666k, 133.333k, 400k |
+| 7 or 8 | 8 | 250, 500, 1k, 2.5k, 5k, 10k, 25k, 50k, 100k, 300k |
+
+### Full multichannel samplerate validation (2026-09-05)
+
+The complete ten-rate list above was exercised through PulseView at physical
+widths 8, 6, 4 and 2 in one build. CH1 carried a 20 Hz sine reference and a
+second enabled channel carried the onboard 1 kHz square reference. Every rate
+at every width produced the expected frame span and waveform cycle count, with
+correct channel identity and no rate-specific data corruption. The A3=0x12
+through A3=0x19 entries are therefore hardware-validated rather than inferred
+from the timebase progression alone.
+
+Several acquisitions encountered the device's already-observed transient USB
+disappearance or initialization failure. The driver now retries the complete
+reopen plus initialization sequence for up to 15 seconds at 500 ms intervals,
+with explicit recovery-entry, retry, success and terminal-failure logging.
+Configuration and unsupported-mode errors remain immediate failures.
 
 Multi-channel frames are emitted as one analogue packet per enabled channel.
 This is required because a sigrok analogue packet has one shared meaning and

@@ -75,6 +75,34 @@ static const struct h1008c_rate rate_table[] = {
 	{ UINT64_C(2400000), 0x0f, H1008C_MODE_TRIGGERED },
 };
 
+/*
+ * Aggregate direct-ADC rates for multi-channel Triggered mode.
+ *
+ * The physical-width table and every A3 entry below are hardware-validated.
+ * Keep these separate from rate_table so the established CH1-only Scan/ROLL
+ * list and its mode-disambiguating samplerates remain unchanged.
+ *
+ * PulseView is given the per-channel rate, calculated as aggregate / physical
+ * acquisition width.  Integer division is intentional because libsigrok's
+ * samplerate configuration is integer-valued (for example 400000 / 6 is
+ * exposed as 66666 samples/s/channel).
+ */
+static const struct h1008c_rate multichannel_triggered_rate_table[] = {
+	{ UINT64_C(2000),    0x19, H1008C_MODE_TRIGGERED },
+	{ UINT64_C(4000),    0x18, H1008C_MODE_TRIGGERED },
+	{ UINT64_C(8000),    0x17, H1008C_MODE_TRIGGERED },
+	{ UINT64_C(20000),   0x16, H1008C_MODE_TRIGGERED },
+	{ UINT64_C(40000),   0x15, H1008C_MODE_TRIGGERED },
+	{ UINT64_C(80000),   0x14, H1008C_MODE_TRIGGERED },
+	{ UINT64_C(200000),  0x13, H1008C_MODE_TRIGGERED },
+	{ UINT64_C(400000),  0x12, H1008C_MODE_TRIGGERED },
+	{ UINT64_C(800000),  0x11, H1008C_MODE_TRIGGERED },
+	{ UINT64_C(2400000), 0x0f, H1008C_MODE_TRIGGERED },
+};
+
+#define H1008C_RECOVERY_WINDOW_US  (15 * G_USEC_PER_SEC)
+#define H1008C_RECOVERY_INTERVAL_US (500 * 1000)
+
 
 
 static const char *trigger_sources[] = { "None", "CH1" };
@@ -131,17 +159,21 @@ static const struct h1008c_rate *find_effective_rate(uint64_t samplerate,
 
 	if (!width)
 		return NULL;
-	for (i = 0; i < ARRAY_SIZE(rate_table); i++) {
-		const struct h1008c_rate *rate = &rate_table[i];
-		if (width == 1) {
+	if (width == 1) {
+		for (i = 0; i < ARRAY_SIZE(rate_table); i++) {
+			const struct h1008c_rate *rate = &rate_table[i];
+
 			if (rate->samplerate == samplerate)
 				return rate;
-			continue;
 		}
-		/* Multi-channel transport is validated at both triggered base rates. */
-		if (rate->mode == H1008C_MODE_TRIGGERED &&
-		    (rate->a3 == 0x11 || rate->a3 == 0x0f) &&
-		    rate->samplerate / width == samplerate)
+		return NULL;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(multichannel_triggered_rate_table); i++) {
+		const struct h1008c_rate *rate =
+			&multichannel_triggered_rate_table[i];
+
+		if (rate->samplerate / width == samplerate)
 			return rate;
 	}
 	return NULL;
@@ -375,26 +407,27 @@ static int config_list(uint32_t key, GVariant **data,
 		const struct sr_dev_inst *sdi, const struct sr_channel_group *cg)
 {
 	if (key == SR_CONF_SAMPLERATE) {
-		uint64_t rates[ARRAY_SIZE(rate_table)];
+		uint64_t rates[ARRAY_SIZE(rate_table) +
+			ARRAY_SIZE(multichannel_triggered_rate_table)];
 		unsigned int width, n = 0;
 		size_t i;
 
 		/* Keep configuration usable while the frontend temporarily has no
 		 * channels selected; acquisition_start still rejects that state. */
 		width = MAX(1U, acquisition_width_for_count(enabled_channel_count(sdi)));
-		for (i = 0; i < ARRAY_SIZE(rate_table); i++) {
-			const struct h1008c_rate *rate = &rate_table[i];
-			uint64_t effective;
+		if (width == 1) {
+			for (i = 0; i < ARRAY_SIZE(rate_table); i++)
+				rates[n++] = rate_table[i].samplerate;
+		} else {
+			for (i = 0;
+			     i < ARRAY_SIZE(multichannel_triggered_rate_table); i++) {
+				uint64_t effective =
+					multichannel_triggered_rate_table[i].samplerate /
+					width;
 
-			if (width == 1)
-				effective = rate->samplerate;
-			else if (rate->mode == H1008C_MODE_TRIGGERED &&
-				 (rate->a3 == 0x11 || rate->a3 == 0x0f))
-				effective = rate->samplerate / width;
-			else
-				continue;
-			if (!n || rates[n - 1] != effective)
-				rates[n++] = effective;
+				if (!n || rates[n - 1] != effective)
+					rates[n++] = effective;
+			}
 		}
 		*data = std_gvar_samplerates(rates, n);
 		return SR_OK;
@@ -761,6 +794,53 @@ static int configure_session_trigger(const struct sr_dev_inst *sdi)
 	return SR_OK;
 }
 
+static int reopen_and_startup_with_retry(struct sr_dev_inst *sdi,
+		struct dev_context *devc)
+{
+	gint64 started, deadline, now, delay;
+	unsigned int attempts;
+	int ret;
+
+	started = g_get_monotonic_time();
+	deadline = started + H1008C_RECOVERY_WINDOW_US;
+	attempts = 1;
+	ret = h1008c_reopen(sdi);
+	if (ret == SR_OK)
+		ret = h1008c_startup(sdi, devc->a3, devc->enabled_count,
+			devc->enabled_mask);
+	if (ret == SR_OK)
+		return SR_OK;
+
+	sr_warn("USB acquisition setup failed; entering recovery.");
+	sr_warn("USB recovery window 15.0 s, retry interval 0.5 s.");
+	for (;;) {
+		now = g_get_monotonic_time();
+		if (now >= deadline)
+			break;
+		delay = MIN((gint64)H1008C_RECOVERY_INTERVAL_US, deadline - now);
+		g_usleep((gulong)delay);
+		attempts++;
+		sr_warn("USB recovery retry %u at +%.1f s.", attempts - 1,
+			(double)(g_get_monotonic_time() - started) / G_USEC_PER_SEC);
+		ret = h1008c_reopen(sdi);
+		if (ret == SR_OK)
+			ret = h1008c_startup(sdi, devc->a3, devc->enabled_count,
+				devc->enabled_mask);
+		if (ret == SR_OK) {
+			sr_info("USB recovery succeeded after %.1f s (%u setup attempts).",
+				(double)(g_get_monotonic_time() - started) /
+				G_USEC_PER_SEC, attempts);
+			return SR_OK;
+		}
+		sr_warn("USB recovery retry %u failed.", attempts - 1);
+	}
+
+	sr_err("USB recovery failed after %.1f s (%u setup attempts).",
+		(double)(g_get_monotonic_time() - started) / G_USEC_PER_SEC,
+		attempts);
+	return SR_ERR;
+}
+
 static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 {
 	struct dev_context *devc = sdi->priv;
@@ -772,26 +852,13 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 		return SR_ERR_ARG;
 	}
 	if (devc->enabled_count > 1 &&
-	    (devc->acquisition_mode != H1008C_MODE_TRIGGERED ||
-	     (devc->a3 != 0x11 && devc->a3 != 0x0f))) {
-		sr_err("Multi-channel acquisition is currently validated only for "
-			"Triggered A3=0x11 and A3=0x0f.");
+	    devc->acquisition_mode != H1008C_MODE_TRIGGERED) {
+		sr_err("Multi-channel acquisition requires Triggered mode.");
 		return SR_ERR_NA;
 	}
 	devc->samplerate = devc->base_samplerate / devc->acquisition_width;
 	if (apply_sample_limit(devc) != SR_OK)
 		return SR_ERR;
-
-	/*
-	 * The 1008C can logically disappear/re-enumerate after several seconds
-	 * without protocol traffic. PulseView commonly keeps the device instance
-	 * open between Run presses, leaving us with a stale libusb handle. Refresh
-	 * the handle by physical USB port path at the start of every acquisition.
-	 */
-	if (h1008c_reopen(mutable_sdi) != SR_OK) {
-		sr_err("Unable to reacquire Hantek 1008C USB connection.");
-		return SR_ERR;
-	}
 
 	load_persistent_calibration(sdi);
 	if (configure_session_trigger(sdi) != SR_OK)
@@ -804,7 +871,7 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 	 * h1008c_start_roll() deliberately sends the same A3 again immediately
 	 * before A4 02, matching the validated C7/C8 laboratory sequence.
 	 */
-	if (h1008c_startup(sdi, devc->a3, devc->enabled_count, devc->enabled_mask) != SR_OK)
+	if (reopen_and_startup_with_retry(mutable_sdi, devc) != SR_OK)
 		return SR_ERR;
 	devc->running = TRUE;
 	devc->triggered_count = 0;
