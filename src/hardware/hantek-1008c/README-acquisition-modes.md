@@ -1,4 +1,4 @@
-# Hantek 1008C TRIGGERED, diagnostic ROLL, and official Scan acquisition
+# Hantek 1008C Trigger, Scan, and Roll acquisition
 
 ## Terminology
 
@@ -6,10 +6,10 @@ The official Hantek Windows application calls the finite C6/A6 acquisition famil
 
 ## Observed acquisition mechanisms
 
-The Hantek 1008C currently has three observed acquisition/transfer mechanisms relevant
-to this driver. The finite C6/A6 Triggered family and the official C9/CA Scan family are implemented
-in the production driver. The separate C7/C8 ROLL path remains diagnostic/legacy
-where it overlaps the official Scan range.
+The Hantek 1008C has three independently observed acquisition/transfer mechanisms
+relevant to this driver. The finite C6/A6 Triggered family, official C9/CA Scan
+family, and separate C7/C8 Roll family are implemented in the production driver
+for one through eight enabled channels.
 
 **TRIGGERED mode** is a finite, triggered/swept acquisition. The scope is armed, a block of
 samples is captured into hardware memory, the completed frame is transferred to the
@@ -25,7 +25,7 @@ With one active channel the Hantek has a 4K-sample TRIGGERED memory. Repeated 4K
 therefore look "live" in a frontend, just as repeated CRT sweeps look continuous to the
 eye, but the frames are still separate acquisitions.
 
-**Diagnostic ROLL mode** is the existing continuous low-rate `A4 02 + C7/C8` path.
+**ROLL mode** is the continuous low-rate `A4 02 + C7/C8` path.
 The device reports the number of available bytes with `C7` and the host drains them
 with `C8`. There is no 4K sweep boundary defining the trace. This behaves more like a
 strip-chart recorder: new samples continuously arrive and are appended to the timeline.
@@ -134,9 +134,9 @@ hardware with a 50 Hz sine. The observed progression was approximately 40, 20, 8
 This document belongs to the libsigrok Hantek 1008C production driver.
 
 The driver exposes acquisition family through the standard
-`SR_CONF_DEVICE_MODE` string option. With CH1 only, PulseView presents
-`Trigger`, `Scan`, and `Roll`; its samplerate selector contains only values
-for the selected family:
+`SR_CONF_DEVICE_MODE` string option. PulseView presents `Trigger`, `Scan`, and
+`Roll`; its samplerate selector contains only values valid for the selected
+family and current enabled-channel set. For one enabled channel:
 
 | Device mode | CH1 samplerates |
 |---|---|
@@ -145,10 +145,10 @@ for the selected family:
 | Roll | 1, 5, 9, 23, 50, 100, 201, 401, 1003, 2006 Sa/s |
 
 Changing mode selects the fastest valid rate in that family, after which the
-user may choose another family-specific rate. Enabling two or more channels
-while Scan or Roll is selected atomically returns the device to Triggered mode
-and its fastest valid rate for the new physical width. Multi-channel Scan and
-Roll remain unsupported pending separate transport and layout validation.
+user may choose another family-specific rate. Enabling or disabling channels
+retains the selected mode and selects a valid effective rate for the new
+geometry. The complete count-dependent Trigger, Scan, and Roll lists and their
+hardware evidence are documented in the multichannel sections below.
 
 ### TRIGGERED representation in sigrok
 
@@ -875,6 +875,21 @@ the terminal error are printed explicitly. Ground captures are rejected above
 5 counts standard deviation or 32 counts span. Reference validation requires
 1.6--2.4 Vp-p and 900--1100 Hz; it records validation results but never changes
 the saved zero offset or nominal volts-per-count scale.
+
+The calibration format is shared with the companion Python reference project.
+Its identity key is the physical USB connection path, channel, and raw range ID;
+moving the scope to another USB port therefore selects a different identity.
+Back up a known-good store before experiments or driver changes that affect
+analogue frontend initialization:
+
+```
+cp -a ~/.local/share/hantek-1008c/calibration.ini \
+    ~/.local/share/hantek-1008c/calibration-known-good.ini
+```
+
+Calibration must be repeated after an initialization change that shifts the
+grounded ADC baseline. A syntactically compatible but stale zero value produces
+a real DC display offset and must not be hidden by display-side correction.
 
 The utility's parser and measurement checks can be exercised without hardware:
 
