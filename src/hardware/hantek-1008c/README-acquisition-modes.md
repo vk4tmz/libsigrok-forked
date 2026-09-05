@@ -133,23 +133,22 @@ hardware with a 50 Hz sine. The observed progression was approximately 40, 20, 8
 
 This document belongs to the libsigrok Hantek 1008C production driver.
 
-The driver automatically selects acquisition mode from the requested samplerate.
+The driver exposes acquisition family through the standard
+`SR_CONF_DEVICE_MODE` string option. With CH1 only, PulseView presents
+`Trigger`, `Scan`, and `Roll`; its samplerate selector contains only values
+for the selected family:
 
-| Requested rate | Driver mode |
-|---:|---|
-| 2, 4, 8, 20, 40, 80, 200, 400, 800 Sa/s | official Scan |
-| 1003, 2006 Sa/s | Trigger-region C7/C8 |
-| 800 kSa/s | TRIGGERED |
-| 2.4 MSa/s | TRIGGERED |
+| Device mode | CH1 samplerates |
+|---|---|
+| Trigger | 2, 4, 8, 20, 40, 80, 200, 400, 800 kSa/s; 2.4 MSa/s |
+| Scan | 2, 4, 8, 20, 40, 80, 200, 400, 800 Sa/s |
+| Roll | 1, 5, 9, 23, 50, 100, 201, 401, 1003, 2006 Sa/s |
 
-The current exposed one-channel samplerate list is:
-
-`2, 4, 8, 20, 40, 80, 200, 400, 800, 1003, 2006, 800000, 2400000 Sa/s`
-
-The older diagnostic ROLL rates `1, 5, 9, 23, 50, 100, 201, 401 Sa/s`
-are intentionally not advertised to PulseView. Their internal mappings remain
-available as preserved protocol history, but the public list presents the
-official Scan cadence for every validated timebase from 500 ms/div onward.
+Changing mode selects the fastest valid rate in that family, after which the
+user may choose another family-specific rate. Enabling two or more channels
+while Scan or Roll is selected atomically returns the device to Triggered mode
+and its fastest valid rate for the new physical width. Multi-channel Scan and
+Roll remain unsupported pending separate transport and layout validation.
 
 ### TRIGGERED representation in sigrok
 
