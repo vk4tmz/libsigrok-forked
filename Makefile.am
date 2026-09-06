@@ -827,6 +827,8 @@ CLEAN_EXTRA += version-clean
 pkgconfigdir = $(libdir)/pkgconfig
 pkgconfig_DATA = libsigrok.pc
 
+dist_bin_SCRIPTS = contrib/sigrok-hantek-1008c-calibrate
+
 mimeappdir = $(datadir)/mime/packages
 mimeapp_DATA = contrib/vnd.sigrok.session.xml
 
