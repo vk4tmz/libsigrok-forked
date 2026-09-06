@@ -376,6 +376,8 @@ static int arm_triggered_capture(const struct sr_dev_inst *sdi)
 	uint8_t c1[] = { 0xc1, 0x00, 0x00 };
 	uint8_t ab[] = { 0xab, 0x08, 0x00 };
 
+	c1[1] = devc->trigger_source == H1008C_TRIGGER_SOURCE_NONE ?
+		0 : devc->trigger_source;
 	c1[2] = devc->trigger_slope == H1008C_TRIGGER_RISING ? 0x00 : 0x01;
 	ab[1] = (uint8_t)(devc->trigger_level_adc >> 8);
 	ab[2] = (uint8_t)(devc->trigger_level_adc & 0xff);
@@ -393,10 +395,12 @@ static int arm_triggered_capture(const struct sr_dev_inst *sdi)
 	devc->triggered_armed = TRUE;
 	devc->triggered_forced = FALSE;
 	devc->triggered_arm_us = g_get_monotonic_time();
-	sr_dbg("Triggered acquisition armed: policy=%s slope=%s AB=%04x.",
-		devc->trigger_enabled ? "normal" : "auto",
-		devc->trigger_slope == H1008C_TRIGGER_RISING ? "rising" : "falling",
-		devc->trigger_level_adc);
+	if (!devc->triggered_count)
+		sr_dbg("Triggered acquisition armed: policy=%s source=%s slope=%s "
+			"AB=%04x.", devc->trigger_enabled ? "normal" : "auto",
+			h1008c_trigger_source_name(devc->trigger_source),
+			devc->trigger_slope == H1008C_TRIGGER_RISING ?
+				"rising" : "falling", devc->trigger_level_adc);
 	return SR_OK;
 }
 

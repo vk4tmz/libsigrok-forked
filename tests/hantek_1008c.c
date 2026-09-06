@@ -140,6 +140,47 @@ START_TEST(test_range_names)
 }
 END_TEST
 
+START_TEST(test_trigger_source_names)
+{
+	unsigned int channel;
+	char name[8];
+
+	ck_assert_str_eq(h1008c_trigger_source_name(
+		H1008C_TRIGGER_SOURCE_NONE), "None");
+	ck_assert_int_eq(h1008c_trigger_source_id("None"),
+		H1008C_TRIGGER_SOURCE_NONE);
+	for (channel = 0; channel < H1008C_NUM_HW_CHANNELS; channel++) {
+		g_snprintf(name, sizeof(name), "CH%u", channel + 1);
+		ck_assert_str_eq(h1008c_trigger_source_name(channel), name);
+		ck_assert_int_eq(h1008c_trigger_source_id(name), channel);
+	}
+	ck_assert_ptr_null(h1008c_trigger_source_name(H1008C_NUM_HW_CHANNELS));
+	ck_assert_int_eq(h1008c_trigger_source_id("CH9"), -1);
+}
+END_TEST
+
+START_TEST(test_trigger_level_voltage_conversion)
+{
+	uint16_t raw_adc;
+
+	ck_assert_int_eq(h1008c_trigger_level_to_adc(
+		0.0, 2004.929, 0.01, &raw_adc), SR_OK);
+	ck_assert_uint_eq(raw_adc, 2005);
+	ck_assert_int_eq(h1008c_trigger_level_to_adc(
+		0.25, 2004.929, 0.01, &raw_adc), SR_OK);
+	ck_assert_uint_eq(raw_adc, 2030);
+	ck_assert_int_eq(h1008c_trigger_level_to_adc(
+		-0.10, 1985.888, 0.00125, &raw_adc), SR_OK);
+	ck_assert_uint_eq(raw_adc, 1906);
+	ck_assert_int_eq(h1008c_trigger_level_to_adc(
+		25.0, 2004.929, 0.01, &raw_adc), SR_ERR_ARG);
+	ck_assert_int_eq(h1008c_trigger_level_to_adc(
+		0.0, 2004.929, 0.0, &raw_adc), SR_ERR_ARG);
+	ck_assert_int_eq(h1008c_trigger_level_to_adc(
+		0.0, 2004.929, 0.01, NULL), SR_ERR_ARG);
+}
+END_TEST
+
 static void check_rates(enum h1008c_acquisition_mode mode,
 		const uint64_t *rates, const uint8_t *a3, size_t count)
 {
@@ -214,6 +255,8 @@ int main(void)
 	tc = tcase_create("model");
 	tcase_add_test(tc, test_acquisition_geometry);
 	tcase_add_test(tc, test_range_names);
+	tcase_add_test(tc, test_trigger_source_names);
+	tcase_add_test(tc, test_trigger_level_voltage_conversion);
 	tcase_add_test(tc, test_validated_rate_tables);
 	tcase_add_test(tc, test_scan_fragmented_rows);
 	tcase_add_test(tc, test_roll_aux_removed_across_fragments);

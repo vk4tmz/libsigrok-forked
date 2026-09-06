@@ -37,6 +37,7 @@
 #define H1008C_AUTO_TRIGGER_TIMEOUT_US (1870 * 1000)
 
 #define H1008C_NUM_HW_CHANNELS  8
+#define H1008C_TRIGGER_SOURCE_NONE UINT8_MAX
 #define H1008C_SAMPLERATE       UINT64_C(2400000)
 #define H1008C_A3_24MSPS        0x0f
 #define H1008C_A2_RANGE_MVP     0x03
@@ -69,8 +70,9 @@ struct dev_context {
 	uint8_t range_id;
 	enum h1008c_acquisition_mode acquisition_mode;
 	gboolean trigger_enabled;
-	gboolean trigger_source_enabled;
+	uint8_t trigger_source;
 	enum h1008c_trigger_slope trigger_slope;
+	double trigger_level_volts;
 	uint16_t trigger_level_adc;
 	gboolean triggered_armed;
 	gboolean triggered_forced;
@@ -92,6 +94,10 @@ SR_PRIV unsigned int h1008c_rate_divisor(
 		enum h1008c_acquisition_mode mode, unsigned int enabled_count);
 SR_PRIV const char *h1008c_range_name(uint8_t range_id);
 SR_PRIV int h1008c_range_id(const char *name);
+SR_PRIV const char *h1008c_trigger_source_name(uint8_t source);
+SR_PRIV int h1008c_trigger_source_id(const char *name);
+SR_PRIV int h1008c_trigger_level_to_adc(double volts, double zero_adc,
+		double volts_per_count, uint16_t *raw_adc);
 SR_PRIV size_t h1008c_rate_count(enum h1008c_acquisition_mode mode);
 SR_PRIV int h1008c_rate_get(enum h1008c_acquisition_mode mode,
 		size_t index, struct h1008c_rate *rate);

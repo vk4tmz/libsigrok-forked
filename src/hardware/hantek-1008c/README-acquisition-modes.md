@@ -634,19 +634,32 @@ A5 polling non-blocking so a frontend Stop remains responsive while a Normal
 trigger is waiting.
 
 - The canonical trigger path is libsigrok's **session trigger** (`struct sr_trigger`).  A valid session trigger always takes precedence.
-- The driver advertises `SR_CONF_TRIGGER_MATCH` with `SR_TRIGGER_RISING` and `SR_TRIGGER_FALLING` so frontends that support analog session-trigger construction can create a CH1 edge trigger.
-- PulseView 0.5.x exposes the device-level `SR_CONF_TRIGGER_SOURCE` and `SR_CONF_TRIGGER_SLOPE` controls for this analog device but does not currently provide the generic trigger-match toolbar on an analog signal.  As a deliberately narrow frontend fallback, the source list is therefore `None`, `CH1`: `None` means Auto/free-running when no session trigger exists, while explicit `CH1` means Normal hardware triggering using the selected `r`/`f` slope.  This does not invent a trigger-match value and does not alter the canonical session-trigger path.
+- The driver advertises `SR_CONF_TRIGGER_MATCH` with `SR_TRIGGER_RISING` and `SR_TRIGGER_FALLING` so frontends that support analog session-trigger construction can create a CH1--CH8 edge trigger.
+- PulseView 0.5.x exposes the device-level `SR_CONF_TRIGGER_SOURCE` and `SR_CONF_TRIGGER_SLOPE` controls for this analog device but does not currently provide the generic trigger-match toolbar on an analog signal. The fallback source list is `None`, `CH1` through `CH8`: `None` means Auto/free-running when no session trigger exists, while an enabled explicit channel means Normal hardware triggering using the selected `r`/`f` slope. Selecting a disabled source or selecting a source outside Trigger mode is rejected. Disabling the selected source, or switching to Scan or Roll, safely restores `None`. This does not invent a trigger-match value and does not alter the canonical session-trigger path.
 - No session trigger and source `None`: Auto/free-running policy.  Arm with `C0`, poll A5, accept
   a genuine hardware completion when it arrives, otherwise send `C2` after the
   official approximately 1.87 s Auto timeout and then read the forced frame.
-- A CH1 rising/falling session trigger, or the PulseView fallback source `CH1`: Normal policy.  Arm with `C0` and
+- A CH1--CH8 rising/falling session trigger, or the corresponding PulseView fallback source: Normal policy. Arm with `C0` and
   poll A5 indefinitely; no timeout `C2` is sent.  After a genuine triggered
   frame is read, the next acquisition callback re-arms automatically while
   the session remains running.
-- `C1 00 00` is rising (`+`); `C1 00 01` is falling (`-`).
-- `AB` remains the ADC-domain trigger threshold.  The production driver keeps
-  the existing `0x0800` default while trigger-level frontend/configuration
-  semantics are resolved separately; do not invent a voltage mapping here.
+- `C1 <source> 00` is rising (`+`); `C1 <source> 01` is falling (`-`), with zero-based source values `00` through `07` for CH1 through CH8.
+- `SR_CONF_TRIGGER_LEVEL` is exposed to frontends in volts and defaults to
+  `0 V`. Immediately before acquisition, the driver resolves that voltage for
+  the selected trigger channel and active input range into the ADC-domain `AB`
+  value:
+
+  ```text
+  AB = round(zero_adc[channel, range] + trigger_volts /
+             volts_per_count[channel, range])
+  ```
+
+  The per-channel, per-range saved calibration is used when available. If it
+  is missing, the driver warns and uses ADC midscale (`2048`) plus the nominal
+  Narrow, Medium or Wide scale. Values outside the 12-bit ADC interval
+  `0..4095` are rejected rather than clamped. Source `None` retains the
+  established `0x0800` Auto/free-running threshold because no explicit trigger
+  channel is selected.
 - Single/one-shot is a documented official-application policy but is not
   mapped onto ordinary PulseView Run and is not exposed as a device-specific
   sweep control.
@@ -744,10 +757,12 @@ C0
 ```
 
 A CH2->CH1 capture with CH1 stored at -105 mV and CH2 at 0 V sent `AB 07 C9`
-before `C1 00 00`, ruling out stale carry-over of CH2's threshold.  Channels at
+before `C1 00 00`, ruling out stale carry-over of CH2's threshold. Channels at
 the same 0 V UI trigger level can have different AB codes, so trigger voltage
 must be resolved for the selected channel rather than treated as one universal
-ADC threshold.
+ADC threshold. The production driver implements this using the active input
+range and the selected source channel's saved `zero_adc` and
+`volts_per_count` calibration values.
 
 ### USB capture device-address warning
 

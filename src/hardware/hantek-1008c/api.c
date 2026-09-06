@@ -33,6 +33,7 @@ static const uint32_t devopts[] = {
 	SR_CONF_SAMPLERATE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 	SR_CONF_TRIGGER_SOURCE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 	SR_CONF_TRIGGER_SLOPE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_TRIGGER_LEVEL | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_TRIGGER_MATCH | SR_CONF_LIST,
 };
 
@@ -101,7 +102,9 @@ static const struct h1008c_rate multichannel_triggered_rate_table[] = {
 
 
 
-static const char *trigger_sources[] = { "None", "CH1" };
+static const char *trigger_sources[] = {
+	"None", "CH1", "CH2", "CH3", "CH4", "CH5", "CH6", "CH7", "CH8",
+};
 static const char *trigger_slopes[] = { "r", "f" };
 static const char *device_modes[] = { "Trigger", "Scan", "Roll" };
 static const char *range_names[] = { "Narrow", "Medium", "Wide" };
@@ -146,6 +149,39 @@ SR_PRIV int h1008c_range_id(const char *name)
 			return i + 1;
 	}
 	return -1;
+}
+
+SR_PRIV const char *h1008c_trigger_source_name(uint8_t source)
+{
+	if (source == H1008C_TRIGGER_SOURCE_NONE)
+		return trigger_sources[0];
+	return source < H1008C_NUM_HW_CHANNELS ? trigger_sources[source + 1] : NULL;
+}
+
+SR_PRIV int h1008c_trigger_source_id(const char *name)
+{
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(trigger_sources); i++) {
+		if (!strcmp(name, trigger_sources[i]))
+			return i ? (int)i - 1 : H1008C_TRIGGER_SOURCE_NONE;
+	}
+	return -1;
+}
+
+SR_PRIV int h1008c_trigger_level_to_adc(double volts, double zero_adc,
+		double volts_per_count, uint16_t *raw_adc)
+{
+	double raw;
+
+	if (!raw_adc || !isfinite(volts) || !isfinite(zero_adc) ||
+	    !isfinite(volts_per_count) || volts_per_count <= 0.0)
+		return SR_ERR_ARG;
+	raw = zero_adc + volts / volts_per_count;
+	if (raw < 0.0 || raw > 4095.0)
+		return SR_ERR_ARG;
+	*raw_adc = (uint16_t)llround(raw);
+	return SR_OK;
 }
 
 SR_PRIV size_t h1008c_rate_count(enum h1008c_acquisition_mode mode)
@@ -393,8 +429,9 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 		devc->range_id = H1008C_A2_RANGE_MVP;
 		devc->acquisition_mode = H1008C_MODE_TRIGGERED;
 		devc->trigger_enabled = FALSE;
-		devc->trigger_source_enabled = FALSE;
+		devc->trigger_source = H1008C_TRIGGER_SOURCE_NONE;
 		devc->trigger_slope = H1008C_TRIGGER_RISING;
+		devc->trigger_level_volts = 0.0;
 		devc->trigger_level_adc = 0x0800;
 		sdi->priv = devc;
 		devices = g_slist_append(devices, sdi);
@@ -435,11 +472,14 @@ static int config_get(uint32_t key, GVariant **data,
 		return SR_OK;
 	case SR_CONF_TRIGGER_SOURCE:
 		*data = g_variant_new_string(
-			devc->trigger_source_enabled ? "CH1" : "None");
+			h1008c_trigger_source_name(devc->trigger_source));
 		return SR_OK;
 	case SR_CONF_TRIGGER_SLOPE:
 		*data = g_variant_new_string(
 			devc->trigger_slope == H1008C_TRIGGER_RISING ? "r" : "f");
+		return SR_OK;
+	case SR_CONF_TRIGGER_LEVEL:
+		*data = g_variant_new_double(devc->trigger_level_volts);
 		return SR_OK;
 	default:
 		return SR_ERR_NA;
@@ -494,19 +534,31 @@ static int config_set(uint32_t key, GVariant *data,
 		default_rate = default_rate_for_mode(mode, divisor);
 		if (select_rate(devc, default_rate, divisor) != SR_OK)
 			return SR_ERR;
+		if (mode != H1008C_MODE_TRIGGERED)
+			devc->trigger_source = H1008C_TRIGGER_SOURCE_NONE;
 		sr_info("Selected %s device mode; defaulting to %" PRIu64
 			" samples/s, A3=%02x.", name, devc->samplerate, devc->a3);
 		return SR_OK;
 	}
 	if (key == SR_CONF_TRIGGER_SOURCE) {
-		const char *source = g_variant_get_string(data, NULL);
+		const char *name = g_variant_get_string(data, NULL);
+		int source = h1008c_trigger_source_id(name);
 
-		if (!strcmp(source, "None"))
-			devc->trigger_source_enabled = FALSE;
-		else if (!strcmp(source, "CH1"))
-			devc->trigger_source_enabled = TRUE;
-		else
+		if (source < 0)
 			return SR_ERR_ARG;
+		if (source != H1008C_TRIGGER_SOURCE_NONE &&
+		    devc->acquisition_mode != H1008C_MODE_TRIGGERED) {
+			sr_err("Hardware trigger sources are available in Trigger mode only.");
+			return SR_ERR_NA;
+		}
+		if (source != H1008C_TRIGGER_SOURCE_NONE &&
+		    !devc->enabled_mask[source]) {
+			sr_err("CH%d must be enabled before it can be selected as "
+				"the hardware trigger source.", source + 1);
+			return SR_ERR_NA;
+		}
+		devc->trigger_source = source;
+		sr_info("Selected hardware trigger source: %s.", name);
 		return SR_OK;
 	}
 	if (key == SR_CONF_TRIGGER_SLOPE) {
@@ -517,6 +569,15 @@ static int config_set(uint32_t key, GVariant *data,
 			devc->trigger_slope = H1008C_TRIGGER_FALLING;
 		else
 			return SR_ERR_ARG;
+		return SR_OK;
+	}
+	if (key == SR_CONF_TRIGGER_LEVEL) {
+		double volts = g_variant_get_double(data);
+
+		if (!isfinite(volts))
+			return SR_ERR_ARG;
+		devc->trigger_level_volts = volts;
+		sr_info("Selected hardware trigger level: %g V.", volts);
 		return SR_OK;
 	}
 	if (key != SR_CONF_SAMPLERATE)
@@ -626,6 +687,12 @@ static int config_channel_set(const struct sr_dev_inst *sdi,
 	/* sr_dev_channel_enable() has already updated sdi->channels. Refresh all
 	 * channel-count-derived configuration immediately, before the next Run. */
 	capture_enabled_mask(sdi, devc);
+	if (devc->trigger_source != H1008C_TRIGGER_SOURCE_NONE &&
+	    !devc->enabled_mask[devc->trigger_source]) {
+		sr_info("Selected trigger source CH%u was disabled; falling back to None.",
+			devc->trigger_source + 1);
+		devc->trigger_source = H1008C_TRIGGER_SOURCE_NONE;
+	}
 	if (!devc->acquisition_width) {
 		devc->samplerate = devc->base_samplerate;
 		return apply_sample_limit(devc);
@@ -747,6 +814,44 @@ static void calibrate_samples(const struct dev_context *devc,
 	for (i = 0; i < count; i++)
 		samples[i] = (float)((samples[i] - devc->calibration_zero_adc[channel]) *
 			devc->calibration_volts_per_count[channel]);
+}
+
+static int update_trigger_level_adc(struct dev_context *devc)
+{
+	double zero_adc, volts_per_count;
+	unsigned int source;
+	int ret;
+
+	if (devc->trigger_source == H1008C_TRIGGER_SOURCE_NONE) {
+		devc->trigger_level_adc = 0x0800;
+		return SR_OK;
+	}
+	source = devc->trigger_source;
+	if (devc->calibration_valid[source]) {
+		zero_adc = devc->calibration_zero_adc[source];
+		volts_per_count = devc->calibration_volts_per_count[source];
+	} else {
+		zero_adc = 2048.0;
+		volts_per_count = devc->range_id == 1 ? 0.0002 :
+			devc->range_id == 2 ? 0.00125 : 0.01;
+		sr_warn("No calibration for CH%u range %s; trigger conversion uses "
+			"midscale zero and nominal %.9g V/count.", source + 1,
+			h1008c_range_name(devc->range_id), volts_per_count);
+	}
+	ret = h1008c_trigger_level_to_adc(devc->trigger_level_volts,
+		zero_adc, volts_per_count, &devc->trigger_level_adc);
+	if (ret != SR_OK) {
+		sr_err("Trigger level %g V is outside the representable CH%u %s range.",
+			devc->trigger_level_volts, source + 1,
+			h1008c_range_name(devc->range_id));
+		return ret;
+	}
+	sr_info("Trigger level for CH%u range %s: %g V -> AB=%04x "
+		"(zero=%.3f, scale=%.9g V/count%s).", source + 1,
+		h1008c_range_name(devc->range_id), devc->trigger_level_volts,
+		devc->trigger_level_adc, zero_adc, volts_per_count,
+		devc->calibration_valid[source] ? ", calibrated" : ", nominal fallback");
+	return SR_OK;
 }
 
 static void send_analog_channel(struct sr_dev_inst *sdi,
@@ -922,13 +1027,14 @@ static int configure_session_trigger(const struct sr_dev_inst *sdi)
 		 * PulseView currently exposes SR_CONF_TRIGGER_SOURCE/SLOPE for
 		 * analog devices but does not construct a generic analog session
 		 * trigger from the signal popup.  Treat an explicitly selected
-		 * CH1 source as a frontend fallback; the canonical session trigger
+		 * channel source as a frontend fallback; the canonical session trigger
 		 * path below still takes precedence whenever one is present.
 		 */
-		if (!devc->trigger_source_enabled)
+		if (devc->trigger_source == H1008C_TRIGGER_SOURCE_NONE)
 			return SR_OK;
-		if (!devc->enabled_mask[0]) {
-			sr_err("CH1 must be enabled when CH1 hardware trigger is selected.");
+		if (!devc->enabled_mask[devc->trigger_source]) {
+			sr_err("CH%u must be enabled when selected as hardware trigger.",
+				devc->trigger_source + 1);
 			return SR_ERR_ARG;
 		}
 		if (devc->acquisition_mode != H1008C_MODE_TRIGGERED) {
@@ -945,19 +1051,22 @@ static int configure_session_trigger(const struct sr_dev_inst *sdi)
 	}
 	stage = trigger->stages->data;
 	if (!stage->matches || stage->matches->next) {
-		sr_err("Hantek 1008C supports one CH1 edge trigger match only.");
+		sr_err("Hantek 1008C supports one edge trigger match only.");
 		return SR_ERR_ARG;
 	}
 	match = stage->matches->data;
-	if (!match->channel || match->channel->index != 0 ||
+	if (!match->channel || match->channel->index < 0 ||
+	    match->channel->index >= H1008C_NUM_HW_CHANNELS ||
 	    match->channel->type != SR_CHANNEL_ANALOG) {
-		sr_err("Hantek 1008C hardware trigger source is CH1 only.");
+		sr_err("Hantek 1008C hardware trigger source must be CH1 through CH8.");
 		return SR_ERR_ARG;
 	}
-	if (!devc->enabled_mask[0]) {
-		sr_err("CH1 must be enabled for the Hantek 1008C hardware trigger.");
+	if (!devc->enabled_mask[match->channel->index]) {
+		sr_err("CH%d must be enabled for the Hantek 1008C hardware trigger.",
+			match->channel->index + 1);
 		return SR_ERR_ARG;
 	}
+	devc->trigger_source = match->channel->index;
 	if (match->match == SR_TRIGGER_RISING)
 		devc->trigger_slope = H1008C_TRIGGER_RISING;
 	else if (match->match == SR_TRIGGER_FALLING)
@@ -1039,6 +1148,8 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 
 	load_persistent_calibration(sdi);
 	if (configure_session_trigger(sdi) != SR_OK)
+		return SR_ERR;
+	if (update_trigger_level_adc(devc) != SR_OK)
 		return SR_ERR;
 	/*
 	 * Keep the full startup/final configuration on the selected A3 for both
