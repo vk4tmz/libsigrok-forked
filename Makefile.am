@@ -900,6 +900,15 @@ tests_main_SOURCES = \
 
 tests_main_LDADD = libsigrok.la $(SR_EXTRA_LIBS) $(TESTS_LIBS)
 
+if HAVE_CHECK
+if HW_HANTEK_1008C
+TESTS += tests/hantek-1008c
+tests_hantek_1008c_SOURCES = tests/hantek_1008c.c
+tests_hantek_1008c_LDADD = libsigrok.la $(SR_EXTRA_LIBS) $(TESTS_LIBS)
+tests_hantek_1008c_LDFLAGS = -static-libtool-libs
+endif
+endif
+
 BUILD_EXTRA =
 INSTALL_EXTRA =
 UNINSTALL_EXTRA =
