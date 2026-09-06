@@ -1,6 +1,8 @@
 /*
  * This file is part of the libsigrok project.
  *
+ * Copyright (C) 2026 VK4TMZ
+ *
  * Hantek 1008C support, based on independently captured USB transactions and
  * the public mfg92/hantek1008py initialization sequence.
  *
@@ -8,6 +10,14 @@
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef LIBSIGROK_HARDWARE_HANTEK_1008C_PROTOCOL_H
@@ -38,9 +48,9 @@
 
 #define H1008C_NUM_HW_CHANNELS  8
 #define H1008C_TRIGGER_SOURCE_NONE UINT8_MAX
-#define H1008C_SAMPLERATE       UINT64_C(2400000)
+#define H1008C_DEFAULT_BASE_SAMPLERATE UINT64_C(2400000)
 #define H1008C_A3_24MSPS        0x0f
-#define H1008C_A2_RANGE_MVP     0x03
+#define H1008C_DEFAULT_RANGE    0x03
 
 enum h1008c_trigger_slope {
 	H1008C_TRIGGER_RISING = 0,

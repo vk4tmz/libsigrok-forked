@@ -1,12 +1,22 @@
 /*
  * This file is part of the libsigrok project.
  *
+ * Copyright (C) 2026 VK4TMZ
+ *
  * Hantek 1008C oscilloscope driver.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <config.h>
@@ -100,14 +110,13 @@ static const struct h1008c_rate multichannel_triggered_rate_table[] = {
 #define H1008C_RECOVERY_WINDOW_US  (15 * G_USEC_PER_SEC)
 #define H1008C_RECOVERY_INTERVAL_US (500 * 1000)
 
-
-
 static const char *trigger_sources[] = {
 	"None", "CH1", "CH2", "CH3", "CH4", "CH5", "CH6", "CH7", "CH8",
 };
 static const char *trigger_slopes[] = { "r", "f" };
 static const char *device_modes[] = { "Trigger", "Scan", "Roll" };
 static const char *range_names[] = { "Narrow", "Medium", "Wide" };
+static const double range_scales[] = { 0.0002, 0.00125, 0.01 };
 static const int32_t trigger_matches[] = {
 	SR_TRIGGER_RISING,
 	SR_TRIGGER_FALLING,
@@ -149,6 +158,12 @@ SR_PRIV int h1008c_range_id(const char *name)
 			return i + 1;
 	}
 	return -1;
+}
+
+static double nominal_scale(uint8_t range_id)
+{
+	return range_id >= 1 && range_id <= ARRAY_SIZE(range_scales) ?
+		range_scales[range_id - 1] : 0.0;
 }
 
 SR_PRIV const char *h1008c_trigger_source_name(uint8_t source)
@@ -252,8 +267,6 @@ static void capture_enabled_mask(const struct sr_dev_inst *sdi,
 	}
 	devc->acquisition_width = h1008c_acquisition_width(devc->enabled_count);
 }
-
-
 SR_PRIV const struct h1008c_rate *h1008c_find_effective_rate(uint64_t samplerate,
 		unsigned int divisor, enum h1008c_acquisition_mode mode)
 {
@@ -281,11 +294,10 @@ SR_PRIV const struct h1008c_rate *h1008c_find_effective_rate(uint64_t samplerate
 }
 
 static const struct h1008c_rate *default_rate_for_mode(
-		enum h1008c_acquisition_mode mode, unsigned int divisor)
+		enum h1008c_acquisition_mode mode)
 {
 	const struct h1008c_rate *selected = NULL;
 	size_t i;
-	(void)divisor;
 
 	if (mode == H1008C_MODE_TRIGGERED)
 		return &multichannel_triggered_rate_table[
@@ -310,8 +322,6 @@ static int select_rate(struct dev_context *devc,
 	devc->acquisition_mode = rate->mode;
 	return apply_sample_limit(devc);
 }
-
-
 
 #define H1008C_TRIGGERED_FRAME_SAMPLES UINT64_C(4000)
 
@@ -364,7 +374,8 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 	GSList *devices, *conn_devices, *l;
 	const char *conn;
 	char connection_id[64];
-	int i;
+	char name[8];
+	int ch, i;
 
 	devices = NULL;
 	conn_devices = NULL;
@@ -410,23 +421,19 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 			libusb_get_device_address(devlist[i]), NULL);
 
 		/* All eight physical analog inputs are selectable; default to CH1 only. */
-		{
-			int ch;
-			for (ch = 0; ch < H1008C_NUM_HW_CHANNELS; ch++) {
-			char name[8];
+		for (ch = 0; ch < H1008C_NUM_HW_CHANNELS; ch++) {
 			g_snprintf(name, sizeof(name), "CH%d", ch + 1);
-				sr_channel_new(sdi, ch, SR_CHANNEL_ANALOG, ch == 0, name);
-			}
+			sr_channel_new(sdi, ch, SR_CHANNEL_ANALOG, ch == 0, name);
 		}
 		devc = g_malloc0(sizeof(*devc));
 		sr_sw_limits_init(&devc->limits);
-		devc->samplerate = H1008C_SAMPLERATE;
-		devc->base_samplerate = H1008C_SAMPLERATE;
+		devc->samplerate = H1008C_DEFAULT_BASE_SAMPLERATE;
+		devc->base_samplerate = H1008C_DEFAULT_BASE_SAMPLERATE;
 		devc->enabled_count = 1;
 		devc->acquisition_width = 1;
 		devc->enabled_mask[0] = 1;
 		devc->a3 = H1008C_A3_24MSPS;
-		devc->range_id = H1008C_A2_RANGE_MVP;
+		devc->range_id = H1008C_DEFAULT_RANGE;
 		devc->acquisition_mode = H1008C_MODE_TRIGGERED;
 		devc->trigger_enabled = FALSE;
 		devc->trigger_source = H1008C_TRIGGER_SOURCE_NONE;
@@ -509,8 +516,7 @@ static int config_set(uint32_t key, GVariant *data,
 		devc->range_id = range_id;
 		sr_info("Selected input range: %s (A2=%02x, nominal %.9g V/count).",
 			h1008c_range_name(devc->range_id), devc->range_id,
-			devc->range_id == 1 ? 0.0002 :
-			devc->range_id == 2 ? 0.00125 : 0.01);
+			nominal_scale(devc->range_id));
 		return SR_OK;
 	}
 	if (key == SR_CONF_DEVICE_MODE) {
@@ -531,7 +537,7 @@ static int config_set(uint32_t key, GVariant *data,
 		divisor = h1008c_rate_divisor(mode, enabled_count);
 		if (mode == devc->acquisition_mode)
 			return SR_OK;
-		default_rate = default_rate_for_mode(mode, divisor);
+		default_rate = default_rate_for_mode(mode);
 		if (select_rate(devc, default_rate, divisor) != SR_OK)
 			return SR_ERR;
 		if (mode != H1008C_MODE_TRIGGERED)
@@ -706,9 +712,7 @@ static int config_channel_set(const struct sr_dev_inst *sdi,
 			divisor, devc->acquisition_mode);
 	}
 	if (!rate)
-		rate = default_rate_for_mode(devc->acquisition_mode,
-			h1008c_rate_divisor(devc->acquisition_mode,
-				devc->enabled_count));
+		rate = default_rate_for_mode(devc->acquisition_mode);
 
 	return select_rate(devc, rate,
 		h1008c_rate_divisor(devc->acquisition_mode, devc->enabled_count));
@@ -832,8 +836,7 @@ static int update_trigger_level_adc(struct dev_context *devc)
 		volts_per_count = devc->calibration_volts_per_count[source];
 	} else {
 		zero_adc = 2048.0;
-		volts_per_count = devc->range_id == 1 ? 0.0002 :
-			devc->range_id == 2 ? 0.00125 : 0.01;
+		volts_per_count = nominal_scale(devc->range_id);
 		sr_warn("No calibration for CH%u range %s; trigger conversion uses "
 			"midscale zero and nominal %.9g V/count.", source + 1,
 			h1008c_range_name(devc->range_id), volts_per_count);
